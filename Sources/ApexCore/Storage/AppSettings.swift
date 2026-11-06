@@ -65,6 +65,15 @@ public enum TerminalThemePreset: String, CaseIterable, Identifiable, Sendable {
     public var cursorColorHex: String { palette.accent }
 }
 
+/// Top-level sidebar section: sessions, quick commands, or notes
+public enum SidebarSection: String, CaseIterable, Identifiable, Sendable {
+    case sessions
+    case commands
+    case notes
+
+    public var id: String { rawValue }
+}
+
 /// Central application settings manager with reactive publishing and UserDefaults persistence
 @MainActor
 public final class AppSettings: ObservableObject {
@@ -95,6 +104,8 @@ public final class AppSettings: ObservableObject {
         static let sessionLogMaxFileSizeMB = "settings.logging.maxFileSizeMB"
         static let isAutoReconnectEnabled = "settings.ssh.autoReconnect"
         static let isKeepAliveEnhanced = "settings.ssh.keepAliveEnhanced"
+        static let libraryWorkdirPath = "settings.library.workdirPath"
+        static let sidebarActiveSection = "settings.sidebar.activeSection"
     }
     
     // MARK: - Notification
@@ -204,7 +215,25 @@ public final class AppSettings: ObservableObject {
     @Published public var isKeepAliveEnhanced: Bool {
         didSet { defaults.set(isKeepAliveEnhanced, forKey: Keys.isKeepAliveEnhanced) }
     }
-    
+
+    // Library Workbench (quick commands & notes)
+    /// The workdir location is user data, not a preference: resetting settings never repoints it.
+    @Published public var libraryWorkdirPath: String {
+        didSet {
+            defaults.set(libraryWorkdirPath, forKey: Keys.libraryWorkdirPath)
+            NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
+        }
+    }
+    @Published public var sidebarActiveSection: SidebarSection {
+        didSet { defaults.set(sidebarActiveSection.rawValue, forKey: Keys.sidebarActiveSection) }
+    }
+
+    /// Suggested initial library workdir: ~/Documents/AetherTerm
+    nonisolated public static var defaultLibraryWorkdirPath: String {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("AetherTerm", isDirectory: true).path ?? ""
+    }
+
     // MARK: - Init
     public init() {
         let defaultDownloadPath = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first?.path ?? "~/Downloads"
@@ -282,6 +311,14 @@ public final class AppSettings: ObservableObject {
         self.isKeepAliveEnhanced = defaults.object(forKey: Keys.isKeepAliveEnhanced) != nil
             ? defaults.bool(forKey: Keys.isKeepAliveEnhanced)
             : true
+
+        self.libraryWorkdirPath = defaults.string(forKey: Keys.libraryWorkdirPath) ?? ""
+        if let rawSection = defaults.string(forKey: Keys.sidebarActiveSection),
+           let section = SidebarSection(rawValue: rawSection) {
+            self.sidebarActiveSection = section
+        } else {
+            self.sidebarActiveSection = .sessions
+        }
     }
     
     /// Reset all settings to factory default
