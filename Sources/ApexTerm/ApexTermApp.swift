@@ -105,7 +105,7 @@ struct ApexTermApp: App {
     var body: some Scene {
         WindowGroup(id: "main") {
             NavigationSplitView {
-                SidebarView(
+                SidebarRootView(
                     store: sessionStore,
                     selectedSession: $selectedSidebarSession,
                     onConnect: { session in
@@ -113,6 +113,12 @@ struct ApexTermApp: App {
                     },
                     onRunSnippet: { snippet in
                         runSnippet(snippet)
+                    },
+                    onInsertCommand: { command, executeNow in
+                        insertCommandText(command, executeNow: executeNow)
+                    },
+                    onOpenFile: { _ in
+                        // The editor pane hosting library files lands in the next change.
                     }
                 )
                 .frame(minWidth: ApexStyle.minSidebarWidth, idealWidth: ApexStyle.idealSidebarWidth, maxWidth: ApexStyle.maxSidebarWidth)
@@ -467,6 +473,18 @@ struct ApexTermApp: App {
         activeTabs.append(tab)
         selectedTabId = tab.id
         tab.connect()
+    }
+
+    /// Types `command` into the active pane of the selected tab without pressing Enter,
+    /// so the user reviews it and triggers manually; `executeNow` appends the newline.
+    private func insertCommandText(_ command: String, executeNow: Bool) {
+        guard let current = activeTabs.first(where: { $0.id == selectedTabId }) ?? activeTabs.first else { return }
+        let toSend = executeNow ? command + "\n" : command
+        guard let data = toSend.data(using: .utf8) else { return }
+        Task {
+            let target = current.activePane?.sshClient ?? current.sshClient
+            try? await target.sendInput(data)
+        }
     }
     
     private func openLocalTerminal() {
