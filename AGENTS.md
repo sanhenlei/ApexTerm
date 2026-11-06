@@ -153,6 +153,16 @@ swift test
      5. `TC-TERM-08`：「切换并重连」降级目标（`xterm-256color`/`linux`→`xterm`，`xterm`→`vt100`）不会回到缺失类型。
    - 任何单项未通过立即熔断打包流水线。
 
+13. **本地资料库工作台门禁 (RG-15: Library Workbench Gate - 每版必测)**：
+   - 每次发布新版本前，**必须无条件通过 `LibraryStoreTests` 与 `SessionStoreTests`（含 sessions 镜像回调用例）**：
+     1. 工作目录扫描：外部创建的分组/文件可见，非库扩展名与隐藏文件被过滤；
+     2. 文件生命周期：创建（标题去重、文件名清洗）、重命名（改名即改文件）、跨分组移动、删除进废纸篓；
+     3. 分组管理：重命名级联更新文件 group、非空分组删除必须显式 `includingFiles: true`；
+     4. 一次性迁移：`snippets.json` → `commands/` 文件（category→子目录、General→顶层、空命令跳过），二次执行为 no-op；
+     5. sessions 镜像：`sessionsMirrorHandler` 在 `saveAll` 后恰好回调一次且 payload 为脱敏 JSON。
+   - 人工验收（Tart VM 或真机）：首启工作目录引导 → 单击命令仅输入不执行 → ⌥ 单击立即执行 → 笔记三态编辑预览 → SFTP 面板四向切换与拖拽 → 工作目录放入 iCloud 后第二台机器可加载；App Store 沙盒渠道需验证工作目录安全作用域书签生效。
+   - 任何单项未通过立即熔断打包流水线。
+
 ---
 
 ## 🔏 五、构建、Apple 签名与安全公证规范 (Code Signing Standards)

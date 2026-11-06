@@ -1,6 +1,30 @@
 # AetherTerm 更新日志 (Changelog)
 
-本项目的版本记录严格遵循 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/) 与 [Conventional Commits](https://www.conventionalcommits.org/zh-hans/) 规范。
+本项目的版本记录严格遵循 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/) 与 [Conventional Commits](https://conventionalcommits.org/zh-hans/) 规范。
+
+## [Unreleased] 本地运维工作台
+
+### ✨ 新增特性 (Features)
+- **侧边栏三区块（会话 / 快捷命令 / 笔记）**：
+  - 快捷命令与笔记改为**文件式存储**：首次使用引导选择工作目录（默认 `~/Documents/AetherTerm`，可指向 iCloud Drive 等同步盘），目录结构为 `commands/<分组>/<标题>.sh`、`notes/<分组>/<标题>.md`——**文件名即标题、子目录即分组**，任何机器或 Finder 均可直接查看与编辑；
+  - 分组支持新建 / 重命名 / 删除（删除进废纸篓可恢复），**行拖拽到分组即移动文件**（`dropDestination` → 原子文件移动）；
+  - 底层 `LibraryStore` 通过 DispatchSource 目录监听 + 300ms 防抖自动感知同步盘带来的外部变更。
+- **右侧编辑器窗格（⌘⇧E 呼出）**：
+  - 快捷命令文件与 Markdown 笔记在同一个窗格以 **tabs 页签混排**打开，支持 dirty 标记、⌘S 保存（标题修改即重命名文件）、关闭确认与「关闭其他」；
+  - 命令编辑器提供「插入（仅输入不执行）/ 执行（输入+回车）」按钮；笔记编辑器提供 **编辑 | 分栏 | 预览** 三态实时渲染（引入首个第三方依赖 [MarkdownUI](https://github.com/gonzalezreal/swift-markdown-ui)）；
+  - 分栏宽度可拖拽调节并持久化（`workspace.editorSplitRatio`）。
+- **快捷命令「仅输入不执行」语义**：单击命令只把命令文本输入到当前焦点窗格的命令行，**不带回车**，由用户检查后手动触发；**⌥ 单击**才输入并立即执行；`{{var}}` 模板变量保留（弹窗填写后插入）。
+- **SFTP 文件面板四向位置**：设置 → 文件浏览新增「文件面板位置」（上 / 下 / 左 / 右，默认下保持现状），分隔条方向与拖拽语义自适应，比例钳制防止误拖到不可用尺寸。
+- **配置跨设备同步**：工作目录内自动镜像脱敏 `sessions.json`（凭据仍存各机 Keychain），会话区新增「从工作目录导入会话」；旧 `snippets.json` 在首次配置工作目录后一次性迁移为命令文件（原文件保留不动）。
+
+### ⚡️ 体验优化 (Improvements)
+- 底部快捷命令栏数据源切换为文件库（分组 = 分类 pill，顶层文件归入「未分组」），「添加」直接新建命令文件并在编辑器窗格打开；
+- `Snippet` 模板解析泛化为 `resolved(command:)` / `extractVariables(in:)` 静态工具，供文件库与旧模型共用。
+
+### 🧪 质量门禁与性能对比 (Verification & Benchmarks)
+- 新增 `LibraryStoreTests` 覆盖目录扫描（含外部文件/隐藏文件过滤）、CRUD、标题去重、文件名清洗、分组重命名/删除确认、snippets 一次性迁移与 sessions 镜像回调共 10 项用例；
+- 更新 `TitlebarZoomAndUIRegressionTests` 快捷命令栏布局回归至新构造接口；
+- AppStore 沙盒渠道下工作目录访问全程经 `FileAccessStore` 安全作用域书签与租约。
 
 ## [v1.17.2] - 2026-11-04
 

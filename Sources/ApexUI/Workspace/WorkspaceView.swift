@@ -692,11 +692,8 @@ public struct WorkspaceView: View {
                 .background(ApexStyle.surface)
             }
         }
-        .frame(
-            width: isEditorPaneVisible ? max(260, geometry.size.width * editorSplitRatio) : nil,
-            maxHeight: .infinity
-        )
-        .frame(maxWidth: .infinity)
+        .frame(width: isEditorPaneVisible ? max(260, geometry.size.width * editorSplitRatio) : nil)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
 
         // Right-side editor pane for library files (quick commands + notes)
         if isEditorPaneVisible {
