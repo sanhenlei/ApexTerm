@@ -24,6 +24,16 @@ public struct Snippet: Identifiable, Codable, Sendable, Equatable, Hashable {
     
     /// Interpolates variables like {{host}}, {{user}}, {{date}} into command
     public func resolvedCommand(context: [String: String]) -> String {
+        Self.resolved(command: command, context: context)
+    }
+
+    /// Extracts all variable placeholder names in `{{var_name}}`, excluding `{{date}}`
+    public func extractVariables() -> [String] {
+        Self.extractVariables(in: command)
+    }
+
+    /// Interpolates `{{var}}` placeholders in an arbitrary command string.
+    public static func resolved(command: String, context: [String: String]) -> String {
         var result = command
         for (key, val) in context {
             let cleanKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -31,15 +41,15 @@ public struct Snippet: Identifiable, Codable, Sendable, Equatable, Hashable {
                 result = result.replacingOccurrences(of: "{{\(cleanKey)}}", with: val)
             }
         }
-        
+
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
         result = result.replacingOccurrences(of: "{{date}}", with: formatter.string(from: Date()))
         return result
     }
-    
-    /// Extracts all variable placeholder names in `{{var_name}}`, excluding `{{date}}`
-    public func extractVariables() -> [String] {
+
+    /// Extracts `{{var}}` placeholder names from an arbitrary command string, excluding `{{date}}`.
+    public static func extractVariables(in command: String) -> [String] {
         guard let regex = try? NSRegularExpression(pattern: "\\{\\{([a-zA-Z0-9_-]+)\\}\\}", options: []) else {
             return []
         }

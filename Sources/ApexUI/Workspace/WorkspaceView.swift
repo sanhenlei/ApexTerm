@@ -606,13 +606,15 @@ public struct WorkspaceView: View {
                 
                 if isQuickCommandBarVisible {
                     QuickCommandBarView(
-                        store: store,
                         isVisible: $isQuickCommandBarVisible,
-                        onExecuteCommand: { cmd in
+                        onRunCommand: { cmd, executeNow in
                             if let pane = tab.activePane ?? tab.panes.first,
-                               let data = cmd.data(using: .utf8) {
+                               let data = (executeNow ? cmd + "\n" : cmd).data(using: .utf8) {
                                 Task { try? await pane.sshClient.sendInput(data) }
                             }
+                        },
+                        onOpenFile: { file in
+                            openEditorTab(file)
                         }
                     )
                 }
@@ -985,6 +987,27 @@ public struct WorkspaceView: View {
         newTab.connect()
     }
     
+    /// Opens a library file in the editor pane, reusing an existing tab for the same file.
+    private func openEditorTab(_ file: LibraryFile) {
+        if let existing = editorTabs.first(where: { $0.url == file.url }) {
+            selectedEditorTabId = existing.id
+        } else {
+            let content = (try? LibraryStore.shared.read(file)) ?? ""
+            let editorTab = EditorTabItem(
+                kind: file.kind,
+                url: file.url,
+                title: file.title,
+                group: file.group,
+                content: content
+            )
+            editorTabs.append(editorTab)
+            selectedEditorTabId = editorTab.id
+        }
+        withAnimation(ApexStyle.hoverTransition) {
+            isEditorPaneVisible = true
+        }
+    }
+
     private func closeTab(_ tab: TerminalTabItem) {
         for pane in tab.panes {
             Task { await pane.sshClient.disconnect() }

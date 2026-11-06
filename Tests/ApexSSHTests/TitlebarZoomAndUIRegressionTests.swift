@@ -429,13 +429,13 @@ final class TitlebarZoomAndUIRegressionTests: XCTestCase {
         let store = SessionStore()
         let local = Session.local()
         store.sessions = [local]
-        
+
         var isQuickCmdVisible = true
         var executedCommand = ""
         let quickDock = QuickCommandBarView(
-            store: store,
             isVisible: Binding(get: { isQuickCmdVisible }, set: { isQuickCmdVisible = $0 }),
-            onExecuteCommand: { cmd in executedCommand = cmd }
+            onRunCommand: { cmd, _ in executedCommand = cmd },
+            onOpenFile: { _ in }
         )
         let hostingDock = NSHostingView(rootView: quickDock.apexTheme())
         hostingDock.frame = NSRect(x: 0, y: 0, width: 600, height: 38)
