@@ -5,6 +5,7 @@ import ApexCore
 /// Native macOS Sidebar with session tree, folders, tags, quick snippets, and full Chinese localization
 public struct SidebarView: View {
     @ObservedObject private var themeSettings = AppSettings.shared
+    @ObservedObject private var library = LibraryStore.shared
     @ObservedObject var store: SessionStore
     @Binding var selectedSession: Session?
     let onConnect: (Session) -> Void
@@ -59,6 +60,17 @@ public struct SidebarView: View {
                     iconSize: 11
                 ) {
                     showingImportSheet = true
+                }
+
+                if library.workdirURL != nil {
+                    ApexIconButton(
+                        icon: "tray.and.arrow.down",
+                        label: "从工作目录导入会话 (sessions.json)",
+                        size: 24,
+                        iconSize: 11
+                    ) {
+                        importSessionsFromWorkdir()
+                    }
                 }
                 
                 ApexIconButton(
@@ -265,6 +277,20 @@ public struct SidebarView: View {
     }
 
     // MARK: - Credential & Info Copy Actions
+
+    /// Merges the sanitized sessions.json snapshot from the library workdir,
+    /// enabling cross-machine pickup through any synced folder.
+    private func importSessionsFromWorkdir() {
+        guard let workdir = library.workdirURL else { return }
+        let url = workdir.appendingPathComponent("sessions.json")
+        do {
+            let data = try Data(contentsOf: url)
+            let count = try store.importSessionsJSON(from: data, overwrite: false)
+            showToast("已从工作目录导入 \(count) 个会话", isSuccess: true)
+        } catch {
+            showToast("导入失败：\(error.localizedDescription)", isSuccess: false)
+        }
+    }
 
     private func copyUsername(_ session: Session) {
         let username = session.username.trimmingCharacters(in: .whitespacesAndNewlines)

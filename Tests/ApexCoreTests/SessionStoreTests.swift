@@ -38,6 +38,20 @@ final class SessionStoreTests: XCTestCase {
     }
     
     @MainActor
+    func testSessionsMirrorHandlerInvokedOnSaveWithSanitizedJSON() {
+        let store = SessionStore(baseDirectory: tempDirectory)
+        var mirrored: [Data] = []
+        store.sessionsMirrorHandler = { mirrored.append($0) }
+
+        store.addSession(Session(name: "Mirror", host: "192.0.2.5", username: "deploy", authMethod: .agent))
+
+        XCTAssertEqual(mirrored.count, 1, "saveAll should invoke the mirror exactly once")
+        let payload = String(data: mirrored[0], encoding: .utf8) ?? ""
+        XCTAssertTrue(payload.contains("192.0.2.5"), "mirror payload should contain the session")
+        XCTAssertTrue(payload.contains("\"host\""), "mirror payload should be pretty-printed sessions JSON")
+    }
+
+    @MainActor
     func testSessionCRUDAndPersistence() {
         let store = SessionStore(baseDirectory: tempDirectory)
         XCTAssertEqual(store.sessions.count, 0)

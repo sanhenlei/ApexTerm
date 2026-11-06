@@ -9,7 +9,13 @@ public final class SessionStore: ObservableObject {
     @Published public var snippets: [Snippet] = []
     @Published public var triggers: [Trigger] = []
     @Published public var folders: [String] = []
-    
+
+    /// Optional mirror invoked with sanitized sessions JSON after every save.
+    /// Wired by the app to keep `sessions.json` inside the library workdir in sync;
+    /// deliberately a closure (not a singleton call) so isolated test stores never
+    /// write into a real user workdir.
+    public var sessionsMirrorHandler: ((Data) -> Void)?
+
     private let fileManager = FileManager.default
     private let baseDirectory: URL
     
@@ -81,6 +87,9 @@ public final class SessionStore: ObservableObject {
         }
         if let data = try? JSONEncoder().encode(triggers) {
             try? data.write(to: triggersFileURL, options: .atomic)
+        }
+        if let mirror = sessionsMirrorHandler, let data = try? exportSessionsJSON() {
+            mirror(data)
         }
     }
     

@@ -94,6 +94,13 @@ struct ApexTermApp: App {
     
     @FocusedValue(\.isWorkspaceWindow) private var isWorkspaceWindow
 
+    init() {
+        // Mirror sanitized sessions JSON into the library workdir (no-op until a workdir is configured).
+        SessionStore.shared.sessionsMirrorHandler = { data in
+            LibraryStore.shared.mirrorSessionsJSON(data)
+        }
+    }
+
     @State private var activeTabs: [TerminalTabItem] = []
     @State private var selectedTabId: UUID?
     @State private var selectedSidebarSession: Session?

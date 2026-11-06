@@ -90,12 +90,37 @@ public struct SidebarRootView: View {
         .onAppear {
             if settings.libraryWorkdirPath.isEmpty {
                 isWorkdirOnboardingPresented = true
+            } else {
+                migrateSnippetsIfNeeded()
             }
+        }
+        .onChange(of: settings.libraryWorkdirPath) { _, newPath in
+            guard !newPath.isEmpty else { return }
+            migrateSnippetsIfNeeded()
+            mirrorSessionsSnapshot()
         }
         .sheet(isPresented: $isWorkdirOnboardingPresented) {
             WorkdirOnboardingSheet()
                 .apexTheme()
         }
+    }
+
+    // MARK: - Migration & Session Mirror
+
+    /// One-time legacy migration: snippets.json entries become command files
+    /// as soon as a workdir exists and no commands have been created yet.
+    private func migrateSnippetsIfNeeded() {
+        guard library.workdirURL != nil,
+              library.commands.isEmpty,
+              !store.snippets.isEmpty else { return }
+        _ = try? library.migrateSnippets(from: store.snippets)
+    }
+
+    /// Seeds the workdir with a sessions.json snapshot right after configuration,
+    /// so a synced folder is immediately usable on another machine.
+    private func mirrorSessionsSnapshot() {
+        guard let data = try? store.exportSessionsJSON() else { return }
+        library.mirrorSessionsJSON(data)
     }
 
     private var sectionSwitcher: some View {
