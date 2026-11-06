@@ -97,6 +97,9 @@ struct ApexTermApp: App {
     @State private var activeTabs: [TerminalTabItem] = []
     @State private var selectedTabId: UUID?
     @State private var selectedSidebarSession: Session?
+    @State private var editorTabs: [EditorTabItem] = []
+    @State private var selectedEditorTabId: UUID?
+    @AppStorage("workspace.editorVisible") private var isEditorPaneVisible = false
     
     @State private var isAboutPresented = false
     @State private var isShortcutsPresented = false
@@ -117,8 +120,8 @@ struct ApexTermApp: App {
                     onInsertCommand: { command, executeNow in
                         insertCommandText(command, executeNow: executeNow)
                     },
-                    onOpenFile: { _ in
-                        // The editor pane hosting library files lands in the next change.
+                    onOpenFile: { file in
+                        openLibraryFile(file)
                     }
                 )
                 .frame(minWidth: ApexStyle.minSidebarWidth, idealWidth: ApexStyle.idealSidebarWidth, maxWidth: ApexStyle.maxSidebarWidth)
@@ -126,7 +129,9 @@ struct ApexTermApp: App {
                 WorkspaceView(
                     store: sessionStore,
                     activeTabs: $activeTabs,
-                    selectedTabId: $selectedTabId
+                    selectedTabId: $selectedTabId,
+                    editorTabs: $editorTabs,
+                    selectedEditorTabId: $selectedEditorTabId
                 )
             }
             .focusedSceneValue(\.isWorkspaceWindow, true)
@@ -484,6 +489,27 @@ struct ApexTermApp: App {
         Task {
             let target = current.activePane?.sshClient ?? current.sshClient
             try? await target.sendInput(data)
+        }
+    }
+
+    /// Opens a library file in the editor pane, reusing the tab when already open.
+    private func openLibraryFile(_ file: LibraryFile) {
+        if let existing = editorTabs.first(where: { $0.url == file.url }) {
+            selectedEditorTabId = existing.id
+        } else {
+            let content = (try? LibraryStore.shared.read(file)) ?? ""
+            let tab = EditorTabItem(
+                kind: file.kind,
+                url: file.url,
+                title: file.title,
+                group: file.group,
+                content: content
+            )
+            editorTabs.append(tab)
+            selectedEditorTabId = tab.id
+        }
+        withAnimation(ApexStyle.hoverTransition) {
+            isEditorPaneVisible = true
         }
     }
     

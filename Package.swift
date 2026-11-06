@@ -31,7 +31,10 @@ let package = Package(
             targets: ["ApexUI"]
         )
     ],
-    dependencies: [],
+    dependencies: [
+        // Markdown rendering for the notes library (first third-party dependency).
+        .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.1.2")
+    ],
     targets: [
         // MARK: - Core Domain & Security
         .target(
@@ -57,7 +60,12 @@ let package = Package(
         // MARK: - High-Performance Native UI (SwiftUI + AppKit + Swift Charts)
         .target(
             name: "ApexUI",
-            dependencies: ["ApexCore", "ApexSSH", "ApexTerminal"],
+            dependencies: [
+                "ApexCore",
+                "ApexSSH",
+                "ApexTerminal",
+                .product(name: "MarkdownUI", package: "swift-markdown-ui")
+            ],
             path: "Sources/ApexUI"
         ),
         

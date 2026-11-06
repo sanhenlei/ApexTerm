@@ -150,7 +150,7 @@ public final class LibraryStore: ObservableObject {
             let values = try? entry.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
             if values?.isDirectory == true {
                 let children = (try? fm.contentsOfDirectory(at: entry, includingPropertiesForKeys: [.isRegularFileKey])) ?? []
-                for child in children.sorted({ $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }) {
+                for child in children.sorted(by: { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }) {
                     guard Self.isLibraryFile(child, kind: kind) else { continue }
                     files.append(LibraryFile(url: child, kind: kind, title: Self.title(of: child), group: name))
                 }
