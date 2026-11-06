@@ -6,7 +6,7 @@ import ApexTerminal
 /// Standard macOS Preferences / Settings View
 public struct SettingsView: View {
     @ObservedObject private var settings = AppSettings.shared
-    
+
     @State private var selectedTab: Int
 
     /// Wide enough for all six toolbar tabs to stay visible on macOS 14–27.
@@ -335,12 +335,21 @@ private struct BehaviorSettingsTab: View {
 // MARK: - Tab 4: SFTP
 private struct SFTPSettingsTab: View {
     @ObservedObject var settings: AppSettings
-    
+    /// Shares the workspace key so changes apply live to the split layout.
+    @AppStorage("workspace.filesPanelPosition") private var filesPanelPosition: String = SFTPPanelPosition.bottom.rawValue
+
     var body: some View {
         Form {
             Section {
                 Toggle(L10n.sftpShowHiddenLabel, isOn: $settings.showHiddenFiles)
                 Toggle(L10n.sftpAutoSyncLabel, isOn: $settings.sftpAutoSyncEnabled)
+
+                Picker("文件面板位置", selection: $filesPanelPosition) {
+                    ForEach(SFTPPanelPosition.allCases) { position in
+                        Text(position.displayName).tag(position.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
             } header: {
                 Text("文件浏览")
             }

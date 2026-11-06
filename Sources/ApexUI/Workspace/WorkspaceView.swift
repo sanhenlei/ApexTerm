@@ -1161,12 +1161,52 @@ private struct WorkspaceActiveTabSplitView: View {
     @Binding var splitRatio: CGFloat
     @Binding var splitDragStartRatio: CGFloat?
     @State private var paneDragStartRatio: CGFloat?
-    
+    @AppStorage("workspace.filesPanelPosition") private var filesPanelPositionRaw: String = SFTPPanelPosition.bottom.rawValue
+
+    private var position: SFTPPanelPosition {
+        SFTPPanelPosition(rawValue: filesPanelPositionRaw) ?? .bottom
+    }
+
     var body: some View {
         GeometryReader { geometry in
-            VStack(spacing: 0) {
-                // Terminal Area with Split Panes
-                Group {
+            Group {
+                if position == .left || position == .right {
+                    HStack(spacing: 0) {
+                        if isSFTPVisible && position == .left {
+                            sftpPanel
+                            panelDivider(isVerticalLine: true, sign: -1, total: geometry.size.width)
+                        }
+                        terminalArea(geometry)
+                            .frame(width: isSFTPVisible ? geometry.size.width * splitRatio : nil)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        if isSFTPVisible && position == .right {
+                            panelDivider(isVerticalLine: true, sign: 1, total: geometry.size.width)
+                            sftpPanel
+                        }
+                    }
+                } else {
+                    VStack(spacing: 0) {
+                        if isSFTPVisible && position == .top {
+                            sftpPanel
+                            panelDivider(isVerticalLine: false, sign: -1, total: geometry.size.height)
+                        }
+                        terminalArea(geometry)
+                            .frame(height: isSFTPVisible ? geometry.size.height * splitRatio : nil)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        if isSFTPVisible && position == .bottom {
+                            panelDivider(isVerticalLine: false, sign: 1, total: geometry.size.height)
+                            sftpPanel
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Terminal Area with Split Panes
+    @ViewBuilder
+    private func terminalArea(_ geometry: GeometryProxy) -> some View {
+        Group {
                     if tab.splitMode == .single || tab.panes.count < 2 || tab.isPaneMaximized {
                         if let pane = tab.activePane ?? tab.panes.first {
                             ZStack(alignment: .topTrailing) {
@@ -1287,45 +1327,80 @@ private struct WorkspaceActiveTabSplitView: View {
                         }
                     }
                 }
-                .frame(height: isSFTPVisible ? geometry.size.height * splitRatio : geometry.size.height)
-                
-                if isSFTPVisible {
-                    // Split Divider with draggable handle
-                    ApexSplitDividerHandle(isVertical: false)
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("终端与文件面板比例")
-                    .accessibilityValue("\(Int(splitRatio * 100))%")
-                    .accessibilityAdjustableAction { direction in
-                        let minimum = 120.0 / max(geometry.size.height, 240)
-                        let maximum = 1.0 - 100.0 / max(geometry.size.height, 240)
-                        switch direction {
-                        case .increment: splitRatio = min(maximum, splitRatio + 0.05)
-                        case .decrement: splitRatio = max(minimum, splitRatio - 0.05)
-                        @unknown default: break
-                        }
-                    }
-                    .gesture(
-                        DragGesture()
-                            .onChanged { value in
-                                let start = splitDragStartRatio ?? splitRatio
-                                if splitDragStartRatio == nil { splitDragStartRatio = start }
-                                let newRatio = start + value.translation.height / geometry.size.height
-                                let minRatio = 120.0 / max(geometry.size.height, 240)
-                                let maxRatio = 1.0 - (100.0 / max(geometry.size.height, 240))
-                                splitRatio = min(max(newRatio, minRatio), maxRatio)
-                            }
-                            .onEnded { _ in splitDragStartRatio = nil }
-                    )
-                    
-                    // Integrated SFTP Panel with live observed bindings
-                    SFTPView(
-                        currentPath: $tab.currentRemotePath,
-                        isLinkageEnabled: $tab.isDirectoryLinkageEnabled,
-                        session: tab.sshClient
-                    )
-                    .frame(height: max(0, geometry.size.height * (1.0 - splitRatio) - 8))
+    }
+
+    /// SFTP panel filling whatever space the layout gives it.
+    private var sftpPanel: some View {
+        SFTPView(
+            currentPath: $tab.currentRemotePath,
+            isLinkageEnabled: $tab.isDirectoryLinkageEnabled,
+            session: tab.sshClient
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Draggable divider between the terminal area and the SFTP panel.
+    /// `sign` accounts for layout direction: bottom/right grow the terminal with
+    /// positive drag translation, top/left shrink it, keeping drag intuition stable.
+    private func panelDivider(isVerticalLine: Bool, sign: CGFloat, total: CGFloat) -> some View {
+        ApexSplitDividerHandle(isVertical: isVerticalLine)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("终端与文件面板比例")
+            .accessibilityValue("\(Int(splitRatio * 100))%")
+            .accessibilityAdjustableAction { direction in
+                let minimum = Self.minTerminalRatio(isVerticalLine: isVerticalLine, total: total)
+                let maximum = Self.maxTerminalRatio(isVerticalLine: isVerticalLine, total: total)
+                switch direction {
+                case .increment: splitRatio = min(maximum, splitRatio + 0.05)
+                case .decrement: splitRatio = max(minimum, splitRatio - 0.05)
+                @unknown default: break
                 }
             }
+            .gesture(
+                DragGesture()
+                    .onChanged { value in
+                        let start = splitDragStartRatio ?? splitRatio
+                        if splitDragStartRatio == nil { splitDragStartRatio = start }
+                        let translation = isVerticalLine ? value.translation.width : value.translation.height
+                        let minRatio = Self.minTerminalRatio(isVerticalLine: isVerticalLine, total: total)
+                        let maxRatio = Self.maxTerminalRatio(isVerticalLine: isVerticalLine, total: total)
+                        let newRatio = start + sign * translation / total
+                        splitRatio = min(max(newRatio, minRatio), maxRatio)
+                    }
+                    .onEnded { _ in splitDragStartRatio = nil }
+            )
+    }
+
+    /// Terminal keeps at least 120pt vertically / 240pt horizontally.
+    private static func minTerminalRatio(isVerticalLine: Bool, total: CGFloat) -> CGFloat {
+        let minTerminal: CGFloat = isVerticalLine ? 240 : 120
+        let minPanel: CGFloat = isVerticalLine ? 220 : 100
+        return minTerminal / max(total, minTerminal + minPanel)
+    }
+
+    /// The panel keeps at least 100pt vertically / 220pt horizontally.
+    private static func maxTerminalRatio(isVerticalLine: Bool, total: CGFloat) -> CGFloat {
+        let minTerminal: CGFloat = isVerticalLine ? 240 : 120
+        let minPanel: CGFloat = isVerticalLine ? 220 : 100
+        return 1.0 - minPanel / max(total, minTerminal + minPanel)
+    }
+}
+
+/// Configurable placement of the SFTP file panel relative to the terminal area.
+enum SFTPPanelPosition: String, CaseIterable, Identifiable {
+    case top
+    case bottom
+    case left
+    case right
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .top: return "上"
+        case .bottom: return "下"
+        case .left: return "左"
+        case .right: return "右"
         }
     }
 }
