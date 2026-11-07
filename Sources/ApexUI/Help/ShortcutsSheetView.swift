@@ -69,7 +69,12 @@ public struct ShortcutsSheetView: View {
                 ShortcutItem(keys: ["⌃", "L"], description: "清空终端屏幕"),
                 ShortcutItem(keys: ["⌘", "C"], description: "复制选中文本"),
                 ShortcutItem(keys: ["⌘", "V"], description: "粘贴剪切板内容"),
-                ShortcutItem(keys: ["⌘", "+ / − / 0"], description: "放大、缩小或重置终端字号")
+                ShortcutItem(keys: ["⌘", "+ / − / 0"], description: "放大、缩小或重置终端字号"),
+                ShortcutItem(keys: ["⌘", "← / →"], description: "光标跳到行首 / 行尾（同 Ctrl+A / E）"),
+                ShortcutItem(keys: ["⌥", "← / →"], description: "光标按单词左移 / 右移"),
+                ShortcutItem(keys: ["⌘", "⌫"], description: "删除光标前至行首的内容（同 Ctrl+U）"),
+                ShortcutItem(keys: ["⌥", "⌫"], description: "删除光标前一个单词"),
+                ShortcutItem(keys: ["⌃", "A / E / U / K / W"], description: "行首 / 行尾 / 删至行首 / 删至行尾 / 删前一个词")
             ]
         ),
         ShortcutGroup(

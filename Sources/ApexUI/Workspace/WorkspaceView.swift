@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import ApexCore
 import ApexSSH
 import ApexTerminal
@@ -1717,11 +1718,25 @@ private struct WorkspaceBottomStatusBar: View {
             Spacer()
             
             if showsDirectoryControls {
-                Text("\(L10n.currentDirectory): \(tab.currentRemotePath)")
-                    .font(.caption.monospaced())
-                    .foregroundColor(ApexStyle.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                HStack(spacing: ApexStyle.s1) {
+                    Text("\(L10n.currentDirectory): \(tab.currentRemotePath)")
+                        .font(.caption.monospaced())
+                        .foregroundColor(ApexStyle.primary.opacity(0.85))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                        .help("当前工作目录（可直接拖选复制）")
+                    ApexIconButton(
+                        icon: "doc.on.doc",
+                        label: "复制当前路径",
+                        size: 20,
+                        iconSize: 10
+                    ) {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(tab.currentRemotePath, forType: .string)
+                    }
+                    .help("复制当前路径到剪切板")
+                }
             }
         }
         .padding(.horizontal, ApexStyle.s4)

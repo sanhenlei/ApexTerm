@@ -238,7 +238,23 @@ private struct AppearanceSettingsTab: View {
 // MARK: - Tab 3: Behavior
 private struct BehaviorSettingsTab: View {
     @ObservedObject var settings: AppSettings
-    
+
+    private func shortcutRow(_ keys: [String], _ description: String) -> some View {
+        HStack(spacing: ApexStyle.s3) {
+            HStack(spacing: 4) {
+                ForEach(keys, id: \.self) { key in
+                    Text(key).apexKeycap()
+                }
+            }
+            .frame(width: 170, alignment: .leading)
+            Text(description)
+                .font(.caption)
+                .foregroundColor(ApexStyle.secondary)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 1)
+    }
+
     var body: some View {
         Form {
             Section {
@@ -267,6 +283,20 @@ private struct BehaviorSettingsTab: View {
                 }
             } header: {
                 Text("终端缓冲区")
+            }
+
+            Section {
+                shortcutRow(["⌘", "← / →"], "光标跳到行首 / 行尾（同 Ctrl+A / E）")
+                shortcutRow(["⌥", "← / →"], "光标按单词左移 / 右移")
+                shortcutRow(["⌘", "⌫"], "删除光标前至行首的内容（同 Ctrl+U）")
+                shortcutRow(["⌥", "⌫"], "删除光标前一个单词")
+                shortcutRow(["⌃", "C / Z / L / D"], "中断 / 挂起 / 清屏 / EOF")
+                shortcutRow(["⌃", "A / E / U / K / W"], "行首 / 行尾 / 删至行首 / 删至行尾 / 删前一词")
+                shortcutRow(["⌘", "C / V / K / F"], "复制 / 粘贴 / 清屏重置 / 查找")
+            } header: {
+                Text("终端常用快捷键")
+            } footer: {
+                Text("完整快捷键速查表：菜单「帮助 → 键盘快捷键 (⌘/)」。")
             }
             
             Section {

@@ -1584,6 +1584,30 @@ public final class NativeTerminalView: NSTextView {
 
         // 0. Handle Cmd shortcuts: Cmd+K (Clear), Cmd+F (Find), Cmd+G (Next Match), Cmd+Shift+G (Prev Match)
         if event.modifierFlags.contains(.command) {
+            // Cmd+←/→/⌫ line-editing: mapped to the Ctrl+A/E/U equivalents both
+            // readline and zle bind by default. In full-screen apps (vim/less) the
+            // Home/End terminfo sequences are sent instead so editor semantics hold.
+            if shortcutModifiers == [.command] {
+                let alternate = ringBuffer?.isInAlternateScreen == true
+                let appCursor = ringBuffer?.isApplicationCursorKeys == true
+                switch event.keyCode {
+                case 123: // Cmd+Left → line start
+                    let seq = alternate ? ((appCursor ? "\u{1B}O" : "\u{1B}[") + "H") : "\u{01}"
+                    onInput?(Data(seq.utf8))
+                    return
+                case 124: // Cmd+Right → line end
+                    let seq = alternate ? ((appCursor ? "\u{1B}O" : "\u{1B}[") + "F") : "\u{05}"
+                    onInput?(Data(seq.utf8))
+                    return
+                case 51: // Cmd+Backspace → delete to line start (shell only)
+                    if !alternate {
+                        onInput?(Data([0x15]))
+                        return
+                    }
+                default:
+                    break
+                }
+            }
             if let chars = event.charactersIgnoringModifiers?.lowercased() {
                 if shortcutModifiers == [.command] || shortcutModifiers == [.command, .shift] {
                     if chars == "+" || chars == "=" {
