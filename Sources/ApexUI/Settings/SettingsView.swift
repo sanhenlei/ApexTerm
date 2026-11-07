@@ -337,12 +337,15 @@ private struct SFTPSettingsTab: View {
     @ObservedObject var settings: AppSettings
     /// Shares the workspace key so changes apply live to the split layout.
     @AppStorage("workspace.filesPanelPosition") private var filesPanelPosition: String = SFTPPanelPosition.bottom.rawValue
+    /// Initial visibility of the files panel; shared with the workspace toolbar toggle.
+    @AppStorage("workspace.filesVisible") private var launchFilesVisible = false
 
     var body: some View {
         Form {
             Section {
                 Toggle(L10n.sftpShowHiddenLabel, isOn: $settings.showHiddenFiles)
                 Toggle(L10n.sftpAutoSyncLabel, isOn: $settings.sftpAutoSyncEnabled)
+                Toggle("启动时显示文件面板", isOn: $launchFilesVisible)
 
                 Picker("文件面板位置", selection: $filesPanelPosition) {
                     ForEach(SFTPPanelPosition.allCases) { position in

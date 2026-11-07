@@ -1023,7 +1023,18 @@ public final class NativeSSHSession: SSHSessionProtocol, @unchecked Sendable {
         }
     }
 
+    /// Runtime monitoring switch: starts or stops the probe loop without reconnecting.
+    public func setAgentlessMonitoring(enabled: Bool) {
+        if enabled {
+            startAgentlessProbeLoop()
+        } else {
+            probeTask?.cancel()
+            probeTask = nil
+        }
+    }
+
     private func startAgentlessProbeLoop() {
+        probeTask?.cancel()
         probeTask = Task.detached(priority: .background) { [weak self] in
             try? await Task.sleep(nanoseconds: 600_000_000)
             while !Task.isCancelled {

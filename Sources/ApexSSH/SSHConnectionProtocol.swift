@@ -54,7 +54,10 @@ public protocol SSHSessionProtocol: AnyObject, Sendable {
     
     /// Tests connectivity and credential authentication to the target host
     func testConnection() async -> SSHTestConnectionResult
-    
+
+    /// Enables or disables agentless metrics collection at runtime without reconnecting
+    func setAgentlessMonitoring(enabled: Bool)
+
     // Callbacks
     func setOutputHandler(_ handler: @Sendable @escaping (Data) -> Void)
     func setMetricsHandler(_ handler: @Sendable @escaping (ServerMetricsSnapshot) -> Void)
@@ -90,4 +93,5 @@ public extension SSHSessionProtocol {
     func createFile(remotePath: String) async throws {}
     func rename(oldPath: String, newPath: String) async throws {}
     func changePermissions(remotePath: String, permissions: String) async throws {}
+    func setAgentlessMonitoring(enabled: Bool) {}
 }

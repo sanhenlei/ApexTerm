@@ -104,7 +104,7 @@ public struct Session: Identifiable, Codable, Sendable, Equatable, Hashable {
         tags: [String] = [],
         colorHex: String? = nil,
         jumpServerId: UUID? = nil,
-        agentlessMonitorEnabled: Bool = true,
+        agentlessMonitorEnabled: Bool = false,
         sftpAutoSyncEnabled: Bool = true,
         keepAliveIntervalSeconds: Int = 30,
         terminalType: TerminalType = .default,
@@ -143,7 +143,7 @@ public struct Session: Identifiable, Codable, Sendable, Equatable, Hashable {
         self.tags = try container.decodeIfPresent([String].self, forKey: .tags) ?? []
         self.colorHex = try container.decodeIfPresent(String.self, forKey: .colorHex)
         self.jumpServerId = try container.decodeIfPresent(UUID.self, forKey: .jumpServerId)
-        self.agentlessMonitorEnabled = try container.decodeIfPresent(Bool.self, forKey: .agentlessMonitorEnabled) ?? true
+        self.agentlessMonitorEnabled = try container.decodeIfPresent(Bool.self, forKey: .agentlessMonitorEnabled) ?? false
         self.sftpAutoSyncEnabled = try container.decodeIfPresent(Bool.self, forKey: .sftpAutoSyncEnabled) ?? true
         self.keepAliveIntervalSeconds = try container.decodeIfPresent(Int.self, forKey: .keepAliveIntervalSeconds) ?? 30
         // Older builds never wrote this key; unknown values from newer builds also fall back.
@@ -192,7 +192,7 @@ public struct Session: Identifiable, Codable, Sendable, Equatable, Hashable {
             tags: ["本地"],
             colorHex: colorHex,
             jumpServerId: nil,
-            agentlessMonitorEnabled: true,
+            agentlessMonitorEnabled: false,
             sftpAutoSyncEnabled: true,
             keepAliveIntervalSeconds: 0
         )

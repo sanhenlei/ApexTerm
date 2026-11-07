@@ -25,7 +25,7 @@ public struct SessionEditModal: View {
     @State private var folder: String = "常用会话"
     @State private var tags: String = ""
     @State private var colorHex: String = "#0A84FF"
-    @State private var agentlessMonitor: Bool = true
+    @State private var agentlessMonitor: Bool = false
     @State private var sftpAutoSync: Bool = true
     @State private var keepAliveInterval: Int = 15
     @State private var terminalType: TerminalType = .default

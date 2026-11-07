@@ -126,6 +126,8 @@ public final class TerminalTabItem: Identifiable, ObservableObject {
         }
     }
     @Published public var customTitle: String? = nil
+    /// Reactive monitoring switch: seeded from the session flag, drivable at runtime.
+    @Published public var isMonitoringEnabled: Bool
     /// Live local shell cwd (polled once per second); remote sessions rely on OSC 7.
     @Published public var liveDirectoryPath: String? = nil
     private var localCwdPollTask: Task<Void, Never>? = nil
@@ -184,6 +186,7 @@ public final class TerminalTabItem: Identifiable, ObservableObject {
     public init(session: Session, sshClient: SSHSessionProtocol) {
         self.session = session
         self.sshClient = sshClient
+        self.isMonitoringEnabled = session.agentlessMonitorEnabled
         self.currentRemotePath = UserDefaults.standard.string(forKey: "workspace.remotePath.\(session.id.uuidString)")
             ?? "~"
         self.isDirectoryLinkageEnabled = session.sftpAutoSyncEnabled
@@ -212,6 +215,12 @@ public final class TerminalTabItem: Identifiable, ObservableObject {
         
         registerDirectoryLinkage(for: self.sshClient)
         startLocalDirectoryPolling()
+    }
+
+    /// Toggles agentless metrics on the primary client without reconnecting.
+    public func setMonitoringEnabled(_ enabled: Bool) {
+        isMonitoringEnabled = enabled
+        sshClient.setAgentlessMonitoring(enabled: enabled)
     }
 
     /// Local shells do not emit OSC 7 by default, so poll the child process cwd
@@ -431,7 +440,7 @@ public struct WorkspaceView: View {
                 set: { storedSplitRatio = Double(min(max($0, 0.2), 0.85)) })
     }
     @State private var splitDragStartRatio: CGFloat?
-    @AppStorage("workspace.filesVisible") private var isSFTPVisible = true
+    @AppStorage("workspace.filesVisible") private var isSFTPVisible = false
     @AppStorage("workspace.editorVisible") private var isEditorPaneVisible = false
     @AppStorage("workspace.editorSplitRatio") private var storedEditorSplitRatio: Double = 0.64
     @State private var editorSplitDragStart: CGFloat?
@@ -774,7 +783,8 @@ public struct WorkspaceView: View {
             if let tab = currentTab, let primaryPane = tab.panes.first {
                 MetricsDetailOverlay(presentation: metricsDetail, pane: primaryPane,
                                      historyStore: tab.metricsHistory,
-                                     monitoringEnabled: tab.session.agentlessMonitorEnabled)
+                                     monitoringEnabled: tab.isMonitoringEnabled,
+                                     onToggleMonitoring: { tab.setMonitoringEnabled($0) })
             }
         }
         .onChange(of: selectedTabId) { _, _ in metricsDetail.isPresented = false }
@@ -908,8 +918,9 @@ public struct WorkspaceView: View {
             }
             ToolbarItem(placement: .primaryAction) {
                 if let primaryPane = tab.panes.first {
-                    WorkspaceMetricsView(pane: primaryPane, historyStore: tab.metricsHistory, monitoringEnabled: tab.session.agentlessMonitorEnabled,
-                                         presentation: metricsDetail)
+                    WorkspaceMetricsView(pane: primaryPane, historyStore: tab.metricsHistory, monitoringEnabled: tab.isMonitoringEnabled,
+                                         presentation: metricsDetail,
+                                         onToggleMonitoring: { tab.setMonitoringEnabled($0) })
                 }
             }
             ToolbarItemGroup(placement: .primaryAction) {
@@ -1113,13 +1124,15 @@ private struct WorkspaceMetricsView: View {
     let historyStore: ObservableMetricsHistory
     let monitoringEnabled: Bool
     @ObservedObject var presentation: MetricsDetailPresentation
+    var onToggleMonitoring: ((Bool) -> Void)? = nil
 
     var body: some View {
         MetricCapsuleView(historyStore: historyStore, compact: true,
                           monitoringEnabled: monitoringEnabled,
                           connectionActive: pane.connectionState == .connected,
                           connectionConnecting: isConnecting,
-                          isDetailPresented: $presentation.isPresented)
+                          isDetailPresented: $presentation.isPresented,
+                          onToggleMonitoring: onToggleMonitoring)
     }
 
     private var isConnecting: Bool {
@@ -1142,6 +1155,7 @@ private struct MetricsDetailOverlay: View {
     @ObservedObject var pane: TerminalPaneItem
     let historyStore: ObservableMetricsHistory
     let monitoringEnabled: Bool
+    var onToggleMonitoring: ((Bool) -> Void)? = nil
 
     var body: some View {
         if presentation.isPresented {
@@ -1153,7 +1167,8 @@ private struct MetricsDetailOverlay: View {
                 MetricDetailView(historyStore: historyStore, monitoringEnabled: monitoringEnabled,
                                  connectionActive: pane.connectionState == .connected,
                                  connectionConnecting: isConnecting,
-                                 onDismiss: { withAnimation(ApexStyle.springSnappy) { presentation.isPresented = false } })
+                                 onDismiss: { withAnimation(ApexStyle.springSnappy) { presentation.isPresented = false } },
+                                 onToggleMonitoring: onToggleMonitoring)
                     .frame(width: 416)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))

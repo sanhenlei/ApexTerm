@@ -13,17 +13,21 @@ public struct MetricCapsuleView: View {
     private let monitoringEnabled: Bool
     private let connectionActive: Bool
     private let connectionConnecting: Bool
+    /// When provided, a disabled capsule turns monitoring on with a single click
+    /// instead of opening an empty detail card.
+    private let onToggleMonitoring: ((Bool) -> Void)?
 
     /// Pass `isDetailPresented` when the capsule lives in a toolbar: the host then presents the
     /// detail itself. SwiftUI rebuilds toolbar item hosts on unrelated state changes, which
     /// tears down a popover anchored there (it closes or re-presents as a non-key window).
-    public init(historyStore: ObservableMetricsHistory, compact: Bool = false, monitoringEnabled: Bool = true, connectionActive: Bool = true, connectionConnecting: Bool = false, isDetailPresented: Binding<Bool>? = nil) {
+    public init(historyStore: ObservableMetricsHistory, compact: Bool = false, monitoringEnabled: Bool = true, connectionActive: Bool = true, connectionConnecting: Bool = false, isDetailPresented: Binding<Bool>? = nil, onToggleMonitoring: ((Bool) -> Void)? = nil) {
         self.historyStore = historyStore
         self.compact = compact
         self.monitoringEnabled = monitoringEnabled
         self.connectionActive = connectionActive
         self.connectionConnecting = connectionConnecting
         self.externalShowingDetail = isDetailPresented
+        self.onToggleMonitoring = onToggleMonitoring
     }
 
     private var showingDetail: Binding<Bool> {
@@ -39,8 +43,12 @@ public struct MetricCapsuleView: View {
     private func capsule(at date: Date) -> some View {
         let isStale = latest.map { date.timeIntervalSince($0.timestamp) > 30 } ?? false
         return Button(action: {
-            withAnimation(ApexStyle.springSnappy) {
-                showingDetail.wrappedValue.toggle()
+            if !monitoringEnabled, let onToggleMonitoring {
+                onToggleMonitoring(true)
+            } else {
+                withAnimation(ApexStyle.springSnappy) {
+                    showingDetail.wrappedValue.toggle()
+                }
             }
         }) {
             HStack(spacing: 12) {
@@ -56,7 +64,7 @@ public struct MetricCapsuleView: View {
                 } else if latest == nil {
                     Image(systemName: "waveform.path.ecg")
                         .foregroundStyle(ApexStyle.accent)
-                    Text(monitoringEnabled ? "监控待命" : "监控已关闭")
+                    Text(monitoringEnabled ? "监控待命" : (onToggleMonitoring == nil ? "监控已关闭" : "监控已关闭 · 点击开启"))
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(ApexStyle.secondary)
                 } else if isStale {
@@ -272,6 +280,8 @@ public struct MetricDetailView: View {
     let connectionConnecting: Bool
     /// Hosts that present the detail outside a popover supply their own close action.
     var onDismiss: (() -> Void)? = nil
+    /// Optional runtime switch shown in the header; nil hides the control.
+    var onToggleMonitoring: ((Bool) -> Void)? = nil
 
     public var body: some View {
         TimelineView(.periodic(from: .now, by: 2)) { context in
@@ -307,6 +317,17 @@ public struct MetricDetailView: View {
                 }
 
                 Spacer(minLength: 4)
+
+                if let onToggleMonitoring {
+                    Toggle("", isOn: Binding(
+                        get: { monitoringEnabled },
+                        set: { onToggleMonitoring($0) }
+                    ))
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .labelsHidden()
+                    .help(monitoringEnabled ? "关闭实时监控以减少资源占用" : "开启实时监控")
+                }
 
                 if let uptime = latest?.uptimeSeconds {
                     Text(formatUptime(uptime))

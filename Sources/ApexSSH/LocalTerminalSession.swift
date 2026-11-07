@@ -45,6 +45,21 @@ public final class LocalTerminalSession: SSHSessionProtocol, @unchecked Sendable
     
     public init(session: Session = .local()) {
         self.session = session
+        self.isMonitoringEnabled = session.agentlessMonitorEnabled
+    }
+
+    /// Runtime switch backing `setAgentlessMonitoring`; initialized from the session flag.
+    private var isMonitoringEnabled: Bool = false
+
+    /// Runtime monitoring switch: starts or stops local metrics sampling without reconnecting.
+    public func setAgentlessMonitoring(enabled: Bool) {
+        isMonitoringEnabled = enabled
+        if enabled {
+            startLocalMetricsCollector()
+        } else {
+            metricsTimer?.cancel()
+            metricsTimer = nil
+        }
     }
     
     public var wasUserInitiatedDisconnect: Bool { true }
@@ -473,7 +488,7 @@ public final class LocalTerminalSession: SSHSessionProtocol, @unchecked Sendable
     // MARK: - Local Performance Metrics Sampling
     
     private func startLocalMetricsCollector() {
-        guard session.agentlessMonitorEnabled else { return }
+        guard isMonitoringEnabled else { return }
         metricsTimer?.cancel()
         metricsTimer = Task { [weak self] in
             let monitor = AgentlessMonitor()
