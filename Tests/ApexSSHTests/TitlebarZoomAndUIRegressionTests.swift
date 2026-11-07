@@ -270,7 +270,11 @@ final class TitlebarZoomAndUIRegressionTests: XCTestCase {
         let stateHost = NSHostingView(rootView: WindowStateView().frame(width: 0, height: 0))
         window.contentView = stateHost
         window.makeKeyAndOrderFront(nil)
-        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+        // Newer runner images attach NSHostingView's SwiftUI subtree at the first layout
+        // pass; force it synchronously so WindowStateAnchor.viewDidMoveToWindow runs
+        // within the test (upstream master fails here without this nudge).
+        stateHost.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.3))
 
         XCTAssertLessThanOrEqual(window.minSize.width, 640, "NSWindow minSize width must not exceed 640pt")
         XCTAssertEqual(window.minSize.width, ApexStyle.minWindowWidth)

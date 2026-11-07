@@ -43,9 +43,11 @@ final class LibraryStoreTests: XCTestCase {
         try Data("hidden".utf8).write(to: commands.appendingPathComponent(".DS_Store"))
 
         let store = LibraryStore(workdir: tempDirectory)
-        XCTAssertEqual(store.commands.map(\.title), ["负载", "列出容器"])
-        XCTAssertEqual(store.commands[0].group, nil)
-        XCTAssertEqual(store.commands[1].group, "Docker")
+        // Flat order follows entry sort (Latin group names before CJK titles); assert
+        // membership and grouping instead of positional order.
+        XCTAssertEqual(Set(store.commands.map(\.title)), ["负载", "列出容器"])
+        XCTAssertEqual(store.commands.first(where: { $0.title == "负载" })?.group, nil)
+        XCTAssertEqual(store.commands.first(where: { $0.title == "列出容器" })?.group, "Docker")
         XCTAssertEqual(store.commandGroups, ["Docker"])
         XCTAssertEqual(store.notes, [])
     }
