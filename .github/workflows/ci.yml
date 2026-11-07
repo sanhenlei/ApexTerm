@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [ master, main ]
+    branches: [ master, main, feature/library-workbench ]
   pull_request:
     branches: [ master, main ]
 
