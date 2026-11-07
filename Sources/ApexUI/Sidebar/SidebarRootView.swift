@@ -123,35 +123,44 @@ public struct SidebarRootView: View {
         library.mirrorSessionsJSON(data)
     }
 
+    /// Width-adaptive section switcher: full labels when they fit, icon-only pills
+    /// when the sidebar is narrow. Tooltips keep the full names reachable.
     private var sectionSwitcher: some View {
-        HStack(spacing: ApexStyle.sCompact) {
-            ApexPillButton(
-                title: "会话",
-                icon: "server.rack",
-                isSelected: settings.sidebarActiveSection == .sessions,
-                count: store.sessions.count
-            ) {
-                settings.sidebarActiveSection = .sessions
-            }
-            ApexPillButton(
-                title: "快捷命令",
-                icon: "terminal",
-                isSelected: settings.sidebarActiveSection == .commands,
-                count: library.commands.count
-            ) {
-                settings.sidebarActiveSection = .commands
-            }
-            ApexPillButton(
-                title: "笔记",
-                icon: "doc.text",
-                isSelected: settings.sidebarActiveSection == .notes,
-                count: library.notes.count
-            ) {
-                settings.sidebarActiveSection = .notes
-            }
+        ViewThatFits(in: .horizontal) {
+            sectionPillRow(labeled: true)
+            sectionPillRow(labeled: false)
         }
         .padding(.horizontal, ApexStyle.s4)
         .padding(.vertical, ApexStyle.s3)
+    }
+
+    private func sectionPillRow(labeled: Bool) -> some View {
+        HStack(spacing: ApexStyle.sCompact) {
+            sectionPill(.sessions, label: labeled ? "会话" : "", icon: "server.rack", help: "会话")
+            sectionPill(.commands, label: labeled ? "快捷命令" : "", icon: "terminal", help: "快捷命令")
+            sectionPill(.notes, label: labeled ? "笔记" : "", icon: "doc.text", help: "笔记")
+        }
+    }
+
+    private func sectionPill(_ section: SidebarSection, label: String, icon: String, help: String) -> some View {
+        ApexPillButton(
+            title: label,
+            icon: icon,
+            isSelected: settings.sidebarActiveSection == section,
+            count: sectionCount(section)
+        ) {
+            settings.sidebarActiveSection = section
+        }
+        .help(help)
+        .apexAccessibilityLabel(help)
+    }
+
+    private func sectionCount(_ section: SidebarSection) -> Int {
+        switch section {
+        case .sessions: return store.sessions.count
+        case .commands: return library.commands.count
+        case .notes: return library.notes.count
+        }
     }
 }
 
