@@ -1,5 +1,6 @@
 import Foundation
 import ApexCore
+import CPtyFork
 import os
 
 #if canImport(Darwin)
@@ -63,6 +64,11 @@ public final class LocalTerminalSession: SSHSessionProtocol, @unchecked Sendable
     }
     
     public var wasUserInitiatedDisconnect: Bool { true }
+
+    /// PID of the login shell child; used by tests to locate its children.
+    public var shellProcessIdentifier: Int32 {
+        stateLock.withLock { self.childPid }
+    }
     
     public func setOutputHandler(_ handler: @Sendable @escaping (Data) -> Void) {
         self.outputHandler = handler
@@ -127,36 +133,11 @@ public final class LocalTerminalSession: SSHSessionProtocol, @unchecked Sendable
         let flags = fcntl(master, F_GETFL, 0)
         _ = fcntl(master, F_SETFL, flags | O_NONBLOCK)
         
-        var fileActions: posix_spawn_file_actions_t?
-        posix_spawn_file_actions_init(&fileActions)
-        defer { posix_spawn_file_actions_destroy(&fileActions) }
-        
-        posix_spawn_file_actions_adddup2(&fileActions, slave, STDIN_FILENO)
-        posix_spawn_file_actions_adddup2(&fileActions, slave, STDOUT_FILENO)
-        posix_spawn_file_actions_adddup2(&fileActions, slave, STDERR_FILENO)
-        posix_spawn_file_actions_addclose(&fileActions, master)
-        
         let homeDir = NSHomeDirectory()
-        posix_spawn_file_actions_addchdir_np(&fileActions, homeDir)
-        
-        var spawnAttributes: posix_spawnattr_t?
-        posix_spawnattr_init(&spawnAttributes)
-        defer { posix_spawnattr_destroy(&spawnAttributes) }
-        
-        var signalMask = sigset_t()
-        sigemptyset(&signalMask)
-        posix_spawnattr_setsigmask(&spawnAttributes, &signalMask)
-        var defaultSignals = sigset_t()
-        sigemptyset(&defaultSignals)
-        sigaddset(&defaultSignals, SIGWINCH)
-        posix_spawnattr_setsigdefault(&spawnAttributes, &defaultSignals)
-        posix_spawnattr_setflags(&spawnAttributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF))
-        posix_spawnattr_setpgroup(&spawnAttributes, 0)
-        
         let shellPath = Self.resolveShellPath()
         let shellName = (shellPath as NSString).lastPathComponent
         let loginArgv0 = "-" + shellName
-        
+
         let cArgs: [UnsafeMutablePointer<CChar>?] = [
             strdup(loginArgv0),
             nil
@@ -178,16 +159,24 @@ public final class LocalTerminalSession: SSHSessionProtocol, @unchecked Sendable
         var cEnv: [UnsafeMutablePointer<CChar>?] = envVars.map { strdup("\($0.key)=\($0.value)") }
         cEnv.append(nil)
         
-        var pid: pid_t = 0
-        let spawnResult = posix_spawnp(&pid, shellPath, &fileActions, &spawnAttributes, cArgs, cEnv)
-        
+        // Spawn via the C helper: the child calls login_tty (setsid + TIOCSCTTY) before
+        // execve so the login shell owns a controlling terminal — without it the line
+        // discipline has no foreground process group and Ctrl+C (SIGINT) is swallowed.
+        var cArgsMut = cArgs
+        var cEnvMut = cEnv
+        let pid = cArgsMut.withUnsafeMutableBufferPointer { argBuf in
+            cEnvMut.withUnsafeMutableBufferPointer { envBuf in
+                cpty_fork_exec(master, slave, homeDir, shellPath, argBuf.baseAddress!, envBuf.baseAddress!)
+            }
+        }
+
         for p in cArgs { if let ptr = p { free(ptr) } }
         for p in cEnv { if let ptr = p { free(ptr) } }
         close(slave)
-        
-        guard spawnResult == 0 else {
+
+        guard pid > 0 else {
             close(master)
-            let err = NSError(domain: "ApexLocalTerminal", code: Int(spawnResult), userInfo: [NSLocalizedDescriptionKey: "启动本地 Shell 失败 (code: \(spawnResult))"])
+            let err = NSError(domain: "ApexLocalTerminal", code: 1, userInfo: [NSLocalizedDescriptionKey: "启动本地 Shell 失败 (fork)"])
             connectionState = .failed(err.localizedDescription)
             throw err
         }

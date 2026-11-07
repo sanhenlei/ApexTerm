@@ -25,6 +25,12 @@
 - 底部快捷命令栏数据源切换为文件库（分组 = 分类 pill，顶层文件归入「未分组」），「添加」直接新建命令文件并在编辑器窗格打开；
 - `Snippet` 模板解析泛化为 `resolved(command:)` / `extractVariables(in:)` 静态工具，供文件库与旧模型共用。
 
+### 🐞 问题修复 (Bug Fixes)
+- **修复本地终端 Ctrl+C 无法取消已输入内容/中断前台命令的问题**：
+  - 根因：本地 Shell 经 `posix_spawn(POSIX_SPAWN_SETPGROUP)` 启动，自成一个进程组但**不是会话首领、从未获得控制终端**——PTY 行规程的 ISIG 收到 0x03 后找不到前台进程组，SIGINT 被内核静默吞掉（远程会话不受影响：ssh 客户端会把 tty 置 raw 让 0x03 直通远端）；
+  - 修复：新增 C 辅助 target `CPtyFork`（fork 子进程侧执行 `login_tty`：setsid + TIOCSCTTY + dup2，全程 async-signal-safe 后 `execve`），本地登录 Shell 拥有控制终端，作业控制（Ctrl+C / Ctrl+Z）恢复；
+  - 新增 `LocalTerminalCtrlCTest` 端到端回归：真实拉起 Shell 后验证 0x03 能中断前台 `sleep`。
+
 ### 🧪 质量门禁与性能对比 (Verification & Benchmarks)
 - 新增 `LibraryStoreTests` 覆盖目录扫描（含外部文件/隐藏文件过滤）、CRUD、标题去重、文件名清洗、分组重命名/删除确认、snippets 一次性迁移与 sessions 镜像回调共 10 项用例；
 - 更新 `TitlebarZoomAndUIRegressionTests` 快捷命令栏布局回归至新构造接口；

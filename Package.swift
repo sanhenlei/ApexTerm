@@ -46,8 +46,14 @@ let package = Package(
         // MARK: - SSH & Agentless Metrics Protocol Layer
         .target(
             name: "ApexSSH",
-            dependencies: ["ApexCore"],
+            dependencies: ["ApexCore", "CPtyFork"],
             path: "Sources/ApexSSH"
+        ),
+
+        // MARK: - Child-side PTY helper (login_tty for working Ctrl+C)
+        .target(
+            name: "CPtyFork",
+            path: "Sources/CPtyFork"
         ),
         
         // MARK: - Metal Terminal Emulation & Buffer Engine
