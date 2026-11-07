@@ -248,7 +248,7 @@ final class TitlebarZoomAndUIRegressionTests: XCTestCase {
         XCTAssertGreaterThan(workspaceHost.subviews.count, 0, "Workspace should render subviews cleanly")
     }
 
-    func testWindowMinimumDimensionsSupportHalfScreenTiling() {
+    func testWindowMinimumDimensionsSupportHalfScreenTiling() throws {
         // 1. Verify design metrics guarantee 50/50 half-screen tiling on all standard MacBook displays:
         // - 13" MacBook standard (1280x800): half-width is 640pt
         // - 13"/14" MacBook scaled (1440x900): half-width is 720pt
