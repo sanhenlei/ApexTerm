@@ -141,16 +141,15 @@ struct NoteFileEditorView: View {
     }
 }
 
-/// MarkdownUI wrapper rendering note content with the workspace palette.
+/// MarkdownUI wrapper rendering note content; falls back to the library's basic theme.
 struct MarkdownPreviewView: View {
     let markdown: String
 
     var body: some View {
         ScrollView {
             Markdown(markdown)
-                .markdownTheme(.base)
                 .markdownTextStyle(\.code) {
-                    $0.font(.system(.body, design: .monospaced))
+                    FontFamilyVariant(.monospaced)
                 }
                 .padding(ApexStyle.s4)
                 .frame(maxWidth: .infinity, alignment: .leading)

@@ -93,7 +93,7 @@ struct LibraryBrowserView: View {
             if library.workdirURL == nil {
                 LibraryWorkdirEmptyState {
                     LibraryWorkdirPicker.chooseAndConfigure { error in
-                        if let error { showToast(error) }
+                        showToast(error)
                     }
                 }
             } else if files.isEmpty {
