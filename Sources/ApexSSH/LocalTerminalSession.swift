@@ -277,7 +277,23 @@ public final class LocalTerminalSession: SSHSessionProtocol, @unchecked Sendable
     public func disconnect() async {
         terminatePTYProcess()
     }
-    
+
+    /// Current working directory of the login shell child process, used for tab titles.
+    /// Returns nil once the shell has exited or the cwd is not exposed.
+    public func currentWorkingDirectory() -> String? {
+        let pid = stateLock.withLock { self.childPid }
+        guard pid > 0 else { return nil }
+        var vnodeInfo = proc_vnodepathinfo()
+        let bufferSize = Int32(MemoryLayout<proc_vnodepathinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &vnodeInfo, bufferSize) > 0 else { return nil }
+        return withUnsafePointer(to: vnodeInfo.pvi_cdir.vip_path) { pathPointer in
+            pathPointer.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { buffer in
+                let path = String(cString: buffer)
+                return path.isEmpty ? nil : path
+            }
+        }
+    }
+
     deinit {
         metricsTimer?.cancel()
         if let procSource = processSource {

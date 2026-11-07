@@ -126,13 +126,38 @@ public final class TerminalTabItem: Identifiable, ObservableObject {
         }
     }
     @Published public var customTitle: String? = nil
+    /// Live local shell cwd (polled once per second); remote sessions rely on OSC 7.
+    @Published public var liveDirectoryPath: String? = nil
+    private var localCwdPollTask: Task<Void, Never>? = nil
     /// TERM the remote host lacks a terminfo entry for; drives the warning banner
     @Published public var terminfoWarning: TerminalType? = nil
     private var terminfoProbeTask: Task<Void, Never>? = nil
     @Published public var paneSplitRatio: CGFloat = 0.5
-    
+
+    /// Directory for tab/window titles: live local cwd (polled) or the OSC 7 remote path.
+    /// The "~" default is treated as "unknown" so session names stay until a real path arrives.
+    public var fullDirectoryPath: String? {
+        if session.isLocal {
+            return liveDirectoryPath.map(Self.abbreviatedHomePath)
+        }
+        let remote = currentRemotePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !remote.isEmpty, remote != "~" else { return nil }
+        return remote
+    }
+
     public var displayTitle: String {
-        customTitle ?? session.name
+        if let customTitle { return customTitle }
+        if let path = fullDirectoryPath, path != "~" { return path }
+        return session.name
+    }
+
+    nonisolated static func abbreviatedHomePath(_ path: String) -> String {
+        let home = NSHomeDirectory()
+        if path == home { return "~" }
+        if path.hasPrefix(home + "/") {
+            return "~" + path.dropFirst(home.count)
+        }
+        return path
     }
     
     // Split Panes
@@ -186,6 +211,28 @@ public final class TerminalTabItem: Identifiable, ObservableObject {
         }
         
         registerDirectoryLinkage(for: self.sshClient)
+        startLocalDirectoryPolling()
+    }
+
+    /// Local shells do not emit OSC 7 by default, so poll the child process cwd
+    /// for tab titles instead (remote hosts keep using the OSC 7 linkage stream).
+    private func startLocalDirectoryPolling() {
+        guard session.isLocal else { return }
+        localCwdPollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let self else { return }
+                if let path = (self.sshClient as? LocalTerminalSession)?.currentWorkingDirectory() {
+                    self.liveDirectoryPath = path
+                }
+            }
+        }
+    }
+
+    isolated deinit {
+        localCwdPollTask?.cancel()
+        terminfoProbeTask?.cancel()
+        linkageRefreshTask?.cancel()
     }
 
     private var linkageRefreshTask: Task<Void, Never>? = nil
@@ -715,7 +762,13 @@ public struct WorkspaceView: View {
         }
         }
         .navigationTitle(currentTab?.displayTitle ?? L10n.appName)
-        .navigationSubtitle(currentTab.map { $0.session.isLocal ? "本机 Shell (\($0.session.username))" : "\($0.session.username)@\($0.session.host)" } ?? "SSH 与文件工作台")
+        .navigationSubtitle(currentTab.map { tab in
+            let base = tab.session.isLocal ? "本机 Shell (\(tab.session.username))" : "\(tab.session.username)@\(tab.session.host)"
+            if let path = tab.fullDirectoryPath {
+                return "\(base) · \(path)"
+            }
+            return base
+        } ?? "SSH 与文件工作台")
         .toolbar { workspaceToolbar }
         .overlay(alignment: .topTrailing) {
             if let tab = currentTab, let primaryPane = tab.panes.first {
@@ -1741,6 +1794,7 @@ struct TabButton: View {
                 .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
                 .foregroundColor(isSelected ? ApexStyle.primary : (isHovered ? ApexStyle.primary.opacity(0.85) : ApexStyle.secondary))
                 .lineLimit(1)
+                .truncationMode(.head)
             
             Button(action: onClose) {
                 ZStack {

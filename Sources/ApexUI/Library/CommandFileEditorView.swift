@@ -87,10 +87,10 @@ struct CommandFileEditorView: View {
                 .disabled(tab.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
                 ApexIconButton(
-                    icon: "square.and.arrow.down",
+                    icon: "checkmark.circle",
                     label: "保存 (⌘S)",
                     size: 24,
-                    iconSize: 11,
+                    iconSize: 12,
                     isSelected: true
                 ) {
                     onSave()

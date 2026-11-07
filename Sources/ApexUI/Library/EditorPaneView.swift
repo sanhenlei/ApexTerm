@@ -62,20 +62,33 @@ struct EditorPaneView: View {
 
     private var tabBar: some View {
         HStack(spacing: 8) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 4) {
-                    ForEach(tabs) { tab in
-                        EditorTabButton(
-                            tab: tab,
-                            isSelected: tab.id == currentTab?.id,
-                            onSelect: { selectedTabId = tab.id },
-                            onClose: { closeTab(tab) },
-                            onCloseOthers: { closeOtherTabs(tab) }
-                        )
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: true) {
+                    HStack(spacing: 4) {
+                        ForEach(tabs) { tab in
+                            EditorTabButton(
+                                tab: tab,
+                                isSelected: tab.id == currentTab?.id,
+                                onSelect: { selectedTabId = tab.id },
+                                onClose: { closeTab(tab) },
+                                onCloseOthers: { closeOtherTabs(tab) }
+                            )
+                            .id(tab.id)
+                        }
+                    }
+                    .padding(.horizontal, ApexStyle.s3)
+                    .padding(.vertical, 4)
+                }
+                .onChange(of: selectedTabId) { _, newValue in
+                    guard let newValue else { return }
+                    withAnimation(ApexStyle.hoverTransition) {
+                        proxy.scrollTo(newValue, anchor: .center)
                     }
                 }
-                .padding(.horizontal, ApexStyle.s3)
-                .padding(.vertical, 4)
+                .onChange(of: tabs.count) { _, _ in
+                    guard let selected = selectedTabId else { return }
+                    proxy.scrollTo(selected, anchor: .center)
+                }
             }
 
             ApexIconButton(
