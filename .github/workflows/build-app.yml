@@ -1,0 +1,111 @@
+name: Package App
+
+# Manual local-use packaging on the CI runner: assembles an ad-hoc signed
+# AetherTerm.app (no Developer ID / notarization) for personal installation.
+# Full release gates (Tart VM acceptance, Developer ID signing, notarization)
+# remain the domain of scripts/build_app.sh on a maintainer machine.
+on:
+  workflow_dispatch:
+
+jobs:
+  package:
+    name: Package AetherTerm.app (local unsigned build)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build release binary
+        run: swift build -c release
+
+      - name: Install sshpass helper
+        run: |
+          brew install hudochenkov/sshpass/sshpass \
+            || brew install esolitos/ipa/sshpass \
+            || echo "::warning::sshpass unavailable; password auth falls back to PTY prompt autofill"
+
+      - name: Assemble app bundle
+        run: |
+          VERSION="1.18.0-local"
+          BUILD_NUMBER="$(date +%Y%m%d)01"
+          APP_DIR=".build/AetherTerm.app"
+          MACOS_DIR="${APP_DIR}/Contents/MacOS"
+          RESOURCES_DIR="${APP_DIR}/Contents/Resources"
+          mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}"
+
+          cp Resources/ApexTerm.icns "${RESOURCES_DIR}/ApexTerm.icns"
+
+          RELEASE_BIN=""
+          if [ -f ".build/out/Products/Release/ApexTerm" ]; then
+            RELEASE_BIN=".build/out/Products/Release/ApexTerm"
+          elif [ -f ".build/arm64-apple-macosx/release/ApexTerm" ]; then
+            RELEASE_BIN=".build/arm64-apple-macosx/release/ApexTerm"
+          else
+            RELEASE_BIN=$(find .build -type f -perm -111 -name ApexTerm | grep -i release | head -1)
+          fi
+          echo "Using release binary: ${RELEASE_BIN}"
+          cp "${RELEASE_BIN}" "${MACOS_DIR}/ApexTerm"
+          /usr/bin/strip -S "${MACOS_DIR}/ApexTerm"
+          chmod +x "${MACOS_DIR}/ApexTerm"
+
+          SSHPASS="$(command -v sshpass || true)"
+          if [ -n "${SSHPASS}" ]; then
+            echo "Bundling sshpass helper"
+            cp "${SSHPASS}" "${MACOS_DIR}/sshpass"
+            chmod +x "${MACOS_DIR}/sshpass"
+          fi
+
+          cat > "${APP_DIR}/Contents/Info.plist" << EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>ApexTerm</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.apexterm.app</string>
+              <key>CFBundleName</key>
+              <string>AetherTerm</string>
+              <key>CFBundleDisplayName</key>
+              <string>AetherTerm</string>
+              <key>CFBundleIconFile</key>
+              <string>ApexTerm</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>${VERSION}</string>
+              <key>CFBundleVersion</key>
+              <string>${BUILD_NUMBER}</string>
+              <key>LSMinimumSystemVersion</key>
+              <string>14.0</string>
+              <key>NSLocalNetworkUsageDescription</key>
+              <string>连接你选择的局域网 SSH 服务器，并进行 SFTP 文件传输和系统监控。</string>
+              <key>NSHighResolutionCapable</key>
+              <true/>
+              <key>NSSupportsAutomaticGraphicsSwitching</key>
+              <true/>
+              <key>NSRequiresAquaSystemAppearance</key>
+              <false/>
+          </dict>
+          </plist>
+          EOF
+
+          python3 scripts/verify_bundle_security.py "${APP_DIR}"
+
+      - name: Ad-hoc codesign for local launch
+        run: |
+          codesign --force --deep --sign - ".build/AetherTerm.app"
+          codesign --verify --deep --strict ".build/AetherTerm.app"
+
+      - name: Zip bundle
+        run: |
+          cd .build
+          zip -qry AetherTerm-local-macos-arm64.zip AetherTerm.app
+          shasum -a 256 AetherTerm-local-macos-arm64.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AetherTerm-local-macos-arm64
+          path: .build/AetherTerm-local-macos-arm64.zip
+          retention-days: 7
