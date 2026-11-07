@@ -36,8 +36,9 @@ final class LibraryStoreTests: XCTestCase {
     func testScanPicksUpExternallyCreatedFilesAndGroups() throws {
         let fm = FileManager.default
         let commands = tempDirectory.appendingPathComponent("commands", isDirectory: true)
-        try fm.createDirectory(at: commands.appendingPathComponent("Docker"), withIntermediateDirectories: true)
-        try Data("docker ps".utf8).write(to: commands.appendingPathComponent("列出容器.sh"))
+        let docker = commands.appendingPathComponent("Docker")
+        try fm.createDirectory(at: docker, withIntermediateDirectories: true)
+        try Data("docker ps".utf8).write(to: docker.appendingPathComponent("列出容器.sh"))
         try Data("uptime".utf8).write(to: commands.appendingPathComponent("负载.sh"))
         try Data("ignored".utf8).write(to: commands.appendingPathComponent("readme.txt"))
         try Data("hidden".utf8).write(to: commands.appendingPathComponent(".DS_Store"))
