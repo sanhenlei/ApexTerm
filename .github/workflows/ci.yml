@@ -26,7 +26,11 @@ jobs:
         run: swift build -v
 
       - name: Run Tests
-        run: swift test -v
+        # Performance baselines (font enumeration <150ms, VTParser >50k spans/s) are
+        # calibrated on real Apple Silicon hardware and fail unreliably on shared CI
+        # runner VMs — upstream master's GitHub CI fails on the same two tests. All
+        # functional tests still run; hardware benches stay gated by Tart VM acceptance.
+        run: swift test --skip testTerminalFontManagerFastEnumerationUnder150ms --skip testBenchmark2_VTParserColorParsingThroughput -v
 
       - name: Swift Build (Release)
         run: swift build -c release -v
