@@ -205,6 +205,8 @@ struct LibraryBrowserView: View {
                         LibraryGroupLabel(
                             name: group,
                             count: files(in: group).count,
+                            createLabel: isCommand ? "在此分组新建命令" : "在此分组新建笔记",
+                            onCreate: { createFile(in: group) },
                             onRename: {
                                 groupRenameText = group
                                 groupToRename = group
@@ -216,9 +218,11 @@ struct LibraryBrowserView: View {
                         }
                     }
                 )
+                .listRowInsets(EdgeInsets(top: 0, leading: 4, bottom: 0, trailing: 4))
             }
         }
         .listStyle(.sidebar)
+        .environment(\.defaultMinListRowHeight, 22)
         .dropDestination(for: String.self) { items, _ in
             handleDrop(items, toGroup: nil)
         }
@@ -246,6 +250,7 @@ struct LibraryBrowserView: View {
             onOpen: { onOpenFile(file) }
         )
         .draggable(file.url.absoluteString)
+        .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
         .contextMenu {
             if isCommand, let onInsert {
                 Button("输入到当前会话") {
@@ -309,12 +314,14 @@ struct LibraryBrowserView: View {
 
     // MARK: - Actions
 
-    private func createFile() {
+    /// Creates a command/note file (in `group` when provided) and opens it in the editor pane.
+    private func createFile(in group: String? = nil) {
         do {
             let defaultContent = isCommand ? "" : "# 新笔记\n"
             let file = try library.createFile(
                 kind: kind,
                 title: isCommand ? "新命令" : "新笔记",
+                group: group,
                 content: defaultContent
             )
             onOpenFile(file)

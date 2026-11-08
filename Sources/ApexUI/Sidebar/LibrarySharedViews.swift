@@ -20,14 +20,14 @@ struct LibraryFileRow: View {
         Button {
             onPrimary(NSEvent.modifierFlags.contains(.option))
         } label: {
-            HStack(spacing: ApexStyle.s2) {
+            HStack(spacing: 6) {
                 Image(systemName: icon)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: 10, weight: .medium))
                     .foregroundColor(iconColor)
-                    .frame(width: 14)
+                    .frame(width: 13)
 
                 Text(file.title)
-                    .font(.subheadline)
+                    .font(.system(size: 12))
                     .foregroundColor(ApexStyle.primary)
                     .lineLimit(1)
 
@@ -36,15 +36,15 @@ struct LibraryFileRow: View {
                 ApexIconButton(
                     icon: "pencil",
                     label: "编辑 \(file.title)",
-                    size: 22,
-                    iconSize: 10,
+                    size: 18,
+                    iconSize: 8,
                     tint: isHovered ? ApexStyle.accent : nil
                 ) {
                     onOpen()
                 }
                 .opacity(isHovered ? 1.0 : 0.0)
             }
-            .padding(.vertical, 3)
+            .padding(.vertical, 1)
             .padding(.horizontal, 4)
             .background(
                 RoundedRectangle(cornerRadius: ApexStyle.badgeRadius)
@@ -62,16 +62,20 @@ struct LibraryFileRow: View {
     }
 }
 
-/// Disclosure label for a library group (= workdir subdirectory) with rename/delete menu.
+/// Disclosure label for a library group (= workdir subdirectory). The context menu
+/// creates a file directly inside this group, plus rename/delete.
 struct LibraryGroupLabel: View {
     let name: String
     let count: Int
+    let createLabel: String
+    let onCreate: (() -> Void)?
     let onRename: () -> Void
     let onDelete: () -> Void
 
     var body: some View {
         HStack {
             Image(systemName: "folder.fill")
+                .font(.system(size: 11))
                 .foregroundColor(ApexStyle.secondary)
             Text(name)
                 .font(.system(size: 12, weight: .medium))
@@ -85,6 +89,14 @@ struct LibraryGroupLabel: View {
         }
         .contentShape(Rectangle())
         .contextMenu {
+            if let onCreate {
+                Button {
+                    onCreate()
+                } label: {
+                    Label(createLabel, systemImage: "plus.circle")
+                }
+                Divider()
+            }
             Button("重命名分组") { onRename() }
             Divider()
             Button("删除分组", role: .destructive) { onDelete() }
