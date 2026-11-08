@@ -234,19 +234,20 @@ struct LibraryBrowserView: View {
             file: file,
             icon: isCommand ? "terminal.fill" : "doc.text.fill",
             iconColor: isCommand ? ApexStyle.accent : ApexStyle.secondary,
-            primaryActionLabel: isCommand ? "输入到当前会话" : "打开笔记",
+            primaryActionLabel: isCommand ? "打开命令文件" : "打开笔记",
             showsExecuteHint: isCommand,
-            onPrimary: { executeNow in
-                if isCommand, let onInsert {
-                    guard let content = try? library.read(file), !content.isEmpty else {
-                        showToast("命令内容为空")
-                        return
-                    }
-                    onInsert(content, executeNow)
-                } else {
-                    onOpenFile(file)
+            showsFillButton: isCommand,
+            // Row clicks always open the editor — typing into the terminal happens
+            // only via the explicit hover fill button (or ⌥+fill to run immediately).
+            onPrimary: { _ in onOpenFile(file) },
+            onFill: isCommand ? { executeNow in
+                guard let onInsert else { return }
+                guard let content = try? library.read(file), !content.isEmpty else {
+                    showToast("命令内容为空")
+                    return
                 }
-            },
+                onInsert(content, executeNow)
+            } : nil,
             onOpen: { onOpenFile(file) }
         )
         .draggable(file.url.absoluteString)

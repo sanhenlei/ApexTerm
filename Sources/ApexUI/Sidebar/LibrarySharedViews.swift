@@ -3,15 +3,18 @@ import AppKit
 import ApexCore
 
 /// Shared row for library files: title only, content stays hidden until opened.
-/// Clicking the row runs `onPrimary` (commands type into the terminal, notes open the editor);
-/// the hover pencil always opens the editor.
+/// Clicking the row opens the editor for both kinds (no accidental terminal input);
+/// command rows additionally show a hover "fill" button that types into the
+/// terminal without executing (⌥-click fills and runs). The hover pencil opens the editor.
 struct LibraryFileRow: View {
     let file: LibraryFile
     let icon: String
     let iconColor: Color
     let primaryActionLabel: String
     let showsExecuteHint: Bool
+    let showsFillButton: Bool
     let onPrimary: (_ executeNow: Bool) -> Void
+    let onFill: ((_ executeNow: Bool) -> Void)?
     let onOpen: () -> Void
 
     @State private var isHovered = false
@@ -31,7 +34,21 @@ struct LibraryFileRow: View {
                     .foregroundColor(ApexStyle.primary)
                     .lineLimit(1)
 
-                Spacer(minLength: ApexStyle.s1)
+                Spacer(minLength: 2)
+
+                if showsFillButton {
+                    ApexIconButton(
+                        icon: "arrow.down.to.line.compact",
+                        label: "填入终端",
+                        size: 18,
+                        iconSize: 8,
+                        tint: isHovered ? ApexStyle.success : nil
+                    ) {
+                        onFill?(NSEvent.modifierFlags.contains(.option))
+                    }
+                    .opacity(isHovered ? 1.0 : 0.0)
+                    .help("填入到终端不执行（⌥+点击填入并立即执行）")
+                }
 
                 ApexIconButton(
                     icon: "pencil",
@@ -53,7 +70,9 @@ struct LibraryFileRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(showsExecuteHint ? "\(primaryActionLabel)（按住 ⌥ 立即执行）" : primaryActionLabel)
+        .help(showsFillButton
+              ? "点击打开编辑器；悬停「↓」填入终端不执行（⌥+点击立即执行）"
+              : primaryActionLabel)
         .onHover { hovering in
             withAnimation(ApexStyle.hoverTransition) {
                 isHovered = hovering
