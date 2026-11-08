@@ -488,10 +488,11 @@ struct ApexTermApp: App {
 
     /// Types `command` into the active pane of the selected tab without pressing Enter,
     /// so the user reviews it and triggers manually; `executeNow` appends the newline.
+    /// The partially typed prompt line is cleared first (Ctrl+U) so filling REPLACES
+    /// instead of appending.
     private func insertCommandText(_ command: String, executeNow: Bool) {
         guard let current = activeTabs.first(where: { $0.id == selectedTabId }) ?? activeTabs.first else { return }
-        let toSend = executeNow ? command + "\n" : command
-        guard let data = toSend.data(using: .utf8) else { return }
+        guard let data = current.fillInputPayload(command: command, executeNow: executeNow) else { return }
         Task {
             let target = current.activePane?.sshClient ?? current.sshClient
             try? await target.sendInput(data)

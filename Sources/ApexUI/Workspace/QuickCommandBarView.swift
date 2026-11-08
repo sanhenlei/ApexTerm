@@ -151,12 +151,25 @@ public struct QuickCommandBarView: View {
 }
 
 /// Modal dialog prompting values for `{{var}}` placeholders in a command template.
-private struct VariableInputSheet: View {
+/// Shared with the command palette (which passes a `Snippet`).
+struct VariableInputSheet: View {
     let title: String
     let command: String
     @Binding var variableValues: [String: String]
     let onConfirm: (String) -> Void
     let onCancel: () -> Void
+
+    init(snippet: Snippet, variableValues: Binding<[String: String]>, onConfirm: @escaping (String) -> Void, onCancel: @escaping () -> Void) {
+        self.init(title: snippet.title, command: snippet.command, variableValues: variableValues, onConfirm: onConfirm, onCancel: onCancel)
+    }
+
+    init(title: String, command: String, variableValues: Binding<[String: String]>, onConfirm: @escaping (String) -> Void, onCancel: @escaping () -> Void) {
+        self.title = title
+        self.command = command
+        self._variableValues = variableValues
+        self.onConfirm = onConfirm
+        self.onCancel = onCancel
+    }
 
     private var variables: [String] {
         Snippet.extractVariables(in: command)

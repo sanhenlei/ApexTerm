@@ -269,6 +269,14 @@ public final class TerminalTabItem: Identifiable, ObservableObject {
         sshClient.setAgentlessMonitoring(enabled: enabled)
     }
 
+    /// Composes a fill payload that REPLACES any partially typed prompt line:
+    /// Ctrl+U clears the line first (skipped in alternate-screen apps where Ctrl+U
+    /// is an editor command), then the command text, then newline when executing.
+    public func fillInputPayload(command: String, executeNow: Bool) -> Data? {
+        let clearLine = ringBuffer.isInAlternateScreen ? "" : "\u{15}"
+        return (clearLine + command + (executeNow ? "\n" : "")).data(using: .utf8)
+    }
+
     /// Local shells do not emit OSC 7 by default, so poll the child process cwd
     /// for tab titles instead (remote hosts keep using the OSC 7 linkage stream).
     private func startLocalDirectoryPolling() {
@@ -566,6 +574,66 @@ public struct WorkspaceView: View {
             )
     }
     
+    /// Hidden zero-size buttons providing the keyboard-shortcut surface. Kept out of
+    /// `body` so the main view-builder expression stays tractable for the type checker
+    /// after the upstream merge.
+    @ViewBuilder
+    private var hiddenShortcutButtons: some View {
+        Group {
+            ForEach(1...9, id: \.self) { number in
+                Button("") {
+                    guard activeTabs.indices.contains(number - 1) else { return }
+                    selectedTabId = activeTabs[number - 1].id
+                }
+                .keyboardShortcut(KeyEquivalent(Character(String(number))), modifiers: .command)
+            }
+            Button("") { currentTab?.split(mode: .vertical) }
+                .keyboardShortcut("d", modifiers: .command)
+            Button("") { currentTab?.split(mode: .horizontal) }
+                .keyboardShortcut("d", modifiers: [.command, .shift])
+            Button("") { openLocalTerminal() }
+                .keyboardShortcut("t", modifiers: [.command, .shift])
+            Button("") {
+                if let cur = currentTab, let active = cur.activePane {
+                    cur.reconnect(pane: active)
+                }
+            }
+            .keyboardShortcut("r", modifiers: .command)
+            Button("") { selectNextTab() }
+                .keyboardShortcut("]", modifiers: [.command, .shift])
+            Button("") { selectPreviousTab() }
+                .keyboardShortcut("[", modifiers: [.command, .shift])
+            Button("") { currentTab?.toggleMaximizeActivePane() }
+                .keyboardShortcut(.return, modifiers: [.command, .shift])
+            Button("") { currentTab?.focusNextPane() }
+                .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+            Button("") { currentTab?.focusPreviousPane() }
+                .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+            Button("") { currentTab?.focusNextPane() }
+                .keyboardShortcut(.downArrow, modifiers: [.command, .option])
+            Button("") { currentTab?.focusPreviousPane() }
+                .keyboardShortcut(.upArrow, modifiers: [.command, .option])
+            Button("") { isCommandPalettePresented.toggle() }
+                .keyboardShortcut("p", modifiers: .command)
+            Button("") { isQuickCommandBarVisible.toggle() }
+                .keyboardShortcut("b", modifiers: [.command, .shift])
+            Button("") { isTunnelModalPresented.toggle() }
+                .keyboardShortcut("t", modifiers: [.command, .option])
+            Button("") { isProcessInspectorPresented.toggle() }
+                .keyboardShortcut("k", modifiers: [.command, .option])
+            Button("") { copyLastCommandOutput() }
+                .keyboardShortcut("c", modifiers: [.command, .option])
+            Button("") {
+                withAnimation(ApexStyle.hoverTransition) {
+                    isEditorPaneVisible.toggle()
+                }
+            }
+            .keyboardShortcut("e", modifiers: [.command, .shift])
+        }
+        .frame(width: 0, height: 0)
+        .opacity(0)
+    }
+
     public var body: some View {
         GeometryReader { geometry in
         HStack(spacing: 0) {
@@ -657,60 +725,8 @@ public struct WorkspaceView: View {
             }
             
             // Hidden buttons for split and reconnect keyboard shortcuts
-            Group {
-                ForEach(1...9, id: \.self) { number in
-                    Button("") {
-                        guard activeTabs.indices.contains(number - 1) else { return }
-                        selectedTabId = activeTabs[number - 1].id
-                    }
-                    .keyboardShortcut(KeyEquivalent(Character(String(number))), modifiers: .command)
-                }
-                Button("") { currentTab?.split(mode: .vertical) }
-                    .keyboardShortcut("d", modifiers: .command)
-                Button("") { currentTab?.split(mode: .horizontal) }
-                    .keyboardShortcut("d", modifiers: [.command, .shift])
-                Button("") { openLocalTerminal() }
-                    .keyboardShortcut("t", modifiers: [.command, .shift])
-                Button("") {
-                    if let cur = currentTab, let active = cur.activePane {
-                        cur.reconnect(pane: active)
-                    }
-                }
-                .keyboardShortcut("r", modifiers: .command)
-                Button("") { selectNextTab() }
-                    .keyboardShortcut("]", modifiers: [.command, .shift])
-                Button("") { selectPreviousTab() }
-                    .keyboardShortcut("[", modifiers: [.command, .shift])
-                Button("") { currentTab?.toggleMaximizeActivePane() }
-                    .keyboardShortcut(.return, modifiers: [.command, .shift])
-                Button("") { currentTab?.focusNextPane() }
-                    .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
-                Button("") { currentTab?.focusPreviousPane() }
-                    .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
-                Button("") { currentTab?.focusNextPane() }
-                    .keyboardShortcut(.downArrow, modifiers: [.command, .option])
-                Button("") { currentTab?.focusPreviousPane() }
-                    .keyboardShortcut(.upArrow, modifiers: [.command, .option])
-                Button("") { isCommandPalettePresented.toggle() }
-                    .keyboardShortcut("p", modifiers: .command)
-                Button("") { isQuickCommandBarVisible.toggle() }
-                    .keyboardShortcut("b", modifiers: [.command, .shift])
-                Button("") { isTunnelModalPresented.toggle() }
-                    .keyboardShortcut("t", modifiers: [.command, .option])
-                Button("") { isProcessInspectorPresented.toggle() }
-                    .keyboardShortcut("k", modifiers: [.command, .option])
-                Button("") { copyLastCommandOutput() }
-                    .keyboardShortcut("c", modifiers: [.command, .option])
-                Button("") {
-                    withAnimation(ApexStyle.hoverTransition) {
-                        isEditorPaneVisible.toggle()
-                    }
-                }
-                .keyboardShortcut("e", modifiers: [.command, .shift])
-            }
-            .frame(width: 0, height: 0)
-            .opacity(0)
-            
+            hiddenShortcutButtons
+
             // Workspace Split: Terminal on Top, SFTP on Bottom (electerm layout)
             if let tab = currentTab {
                 WorkspaceActiveTabSplitView(
@@ -728,7 +744,7 @@ public struct WorkspaceView: View {
                         isVisible: $isQuickCommandBarVisible,
                         onRunCommand: { cmd, executeNow in
                             if let pane = tab.activePane ?? tab.panes.first,
-                               let data = (executeNow ? cmd + "\n" : cmd).data(using: .utf8) {
+                               let data = tab.fillInputPayload(command: cmd, executeNow: executeNow) {
                                 Task { try? await pane.sshClient.sendInput(data) }
                             }
                         },
@@ -824,7 +840,7 @@ public struct WorkspaceView: View {
                 onInsertCommand: { command, executeNow in
                     guard let tab = currentTab,
                           let pane = tab.activePane ?? tab.panes.first,
-                          let data = (executeNow ? command + "\n" : command).data(using: .utf8) else { return }
+                          let data = tab.fillInputPayload(command: command, executeNow: executeNow) else { return }
                     Task { try? await pane.sshClient.sendInput(data) }
                 }
             )
