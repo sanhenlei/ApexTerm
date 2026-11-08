@@ -10,6 +10,8 @@ public final class TransferManager: ObservableObject {
     
     @Published public private(set) var tasks: [TransferTask] = []
     public var maxConcurrentTransfers: Int?
+    /// Upper bound on retained completed/failed/cancelled task records to prevent unbounded memory growth.
+    public var maxCompletedHistory: Int = 200
     
     private var activeTaskHandles: [UUID: Task<Void, Never>] = [:]
     private var runningTransferCount: Int = 0
@@ -22,10 +24,29 @@ public final class TransferManager: ObservableObject {
 
     public init(distributionChannel: DistributionChannel = .current,
                 fileAccessStore: FileAccessStore = .shared,
-                maxConcurrentTransfers: Int? = nil) {
+                maxConcurrentTransfers: Int? = nil,
+                maxCompletedHistory: Int = 200) {
         self.distributionChannel = distributionChannel
         self.fileAccessStore = fileAccessStore
         self.maxConcurrentTransfers = maxConcurrentTransfers
+        self.maxCompletedHistory = max(1, maxCompletedHistory)
+    }
+
+    /// Prunes oldest terminal (`.completed`, `.failed`, `.cancelled`) tasks when count exceeds `maxCompletedHistory`,
+    /// preserving all `.queued` and `.transferring` tasks.
+    public func pruneCompletedHistoryIfNeeded() {
+        let limit = max(1, maxCompletedHistory)
+        let terminalIndices = tasks.indices.filter { tasks[$0].status.isTerminal }
+        guard terminalIndices.count > limit else { return }
+        // Since new tasks are inserted at index 0, the oldest terminal tasks sit at the end of `terminalIndices`.
+        let indicesToRemove = terminalIndices.suffix(terminalIndices.count - limit)
+        let idsToRemove = Set(indicesToRemove.map { tasks[$0].id })
+        for id in idsToRemove {
+            activeTaskHandles.removeValue(forKey: id)
+            lastSpeedSampleTime.removeValue(forKey: id)
+            lastSampledBytes.removeValue(forKey: id)
+        }
+        tasks.removeAll { idsToRemove.contains($0.id) }
     }
 
     private func effectiveMaxConcurrent(for session: SSHSessionProtocol) -> Int {
@@ -205,10 +226,25 @@ public final class TransferManager: ObservableObject {
         }
         activeTaskHandles[id]?.cancel()
         activeTaskHandles.removeValue(forKey: id)
+        lastSpeedSampleTime.removeValue(forKey: id)
+        lastSampledBytes.removeValue(forKey: id)
         if let idx = tasks.firstIndex(where: { $0.id == id }) {
             tasks[idx].status = .cancelled
             tasks[idx].completedAt = Date()
         }
+        pruneCompletedHistoryIfNeeded()
+    }
+
+    public func removeTask(id: UUID) {
+        if let idx = tasks.firstIndex(where: { $0.id == id }), !tasks[idx].status.isTerminal {
+            cancelTask(id: id)
+        } else {
+            activeTaskHandles[id]?.cancel()
+            activeTaskHandles.removeValue(forKey: id)
+            lastSpeedSampleTime.removeValue(forKey: id)
+            lastSampledBytes.removeValue(forKey: id)
+        }
+        tasks.removeAll { $0.id == id }
     }
 
     public func cancelAllTasks() {
@@ -221,16 +257,25 @@ public final class TransferManager: ObservableObject {
             handle.cancel()
         }
         activeTaskHandles.removeAll()
+        lastSpeedSampleTime.removeAll()
+        lastSampledBytes.removeAll()
         runningTransferCount = 0
         let now = Date()
         for idx in tasks.indices where tasks[idx].status == .queued || tasks[idx].status == .transferring {
             tasks[idx].status = .cancelled
             tasks[idx].completedAt = now
         }
+        pruneCompletedHistoryIfNeeded()
     }
     
     public func clearCompleted() {
-        tasks.removeAll { $0.status == .completed || $0.status == .cancelled }
+        let terminalIds = tasks.filter { $0.status.isTerminal }.map(\.id)
+        for id in terminalIds {
+            activeTaskHandles.removeValue(forKey: id)
+            lastSpeedSampleTime.removeValue(forKey: id)
+            lastSampledBytes.removeValue(forKey: id)
+        }
+        tasks.removeAll { $0.status.isTerminal }
     }
     
     // MARK: - Externally Driven Transfers (Drag & Drop Export / Streaming)
@@ -308,6 +353,7 @@ public final class TransferManager: ObservableObject {
         tasks[idx].completedAt = Date()
         lastSpeedSampleTime.removeValue(forKey: taskId)
         lastSampledBytes.removeValue(forKey: taskId)
+        pruneCompletedHistoryIfNeeded()
     }
     
     /// Mark an externally-driven transfer as failed
@@ -317,6 +363,7 @@ public final class TransferManager: ObservableObject {
         tasks[idx].completedAt = Date()
         lastSpeedSampleTime.removeValue(forKey: taskId)
         lastSampledBytes.removeValue(forKey: taskId)
+        pruneCompletedHistoryIfNeeded()
     }
     
     /// Mark an externally-driven transfer as cancelled
@@ -326,6 +373,7 @@ public final class TransferManager: ObservableObject {
         tasks[idx].completedAt = Date()
         lastSpeedSampleTime.removeValue(forKey: taskId)
         lastSampledBytes.removeValue(forKey: taskId)
+        pruneCompletedHistoryIfNeeded()
     }
     
     // MARK: - Internal Execution
@@ -396,6 +444,7 @@ public final class TransferManager: ObservableObject {
         activeTaskHandles.removeValue(forKey: taskId)
         lastSpeedSampleTime.removeValue(forKey: taskId)
         lastSampledBytes.removeValue(forKey: taskId)
+        pruneCompletedHistoryIfNeeded()
     }
     
     private func executeDownload(
@@ -484,6 +533,7 @@ public final class TransferManager: ObservableObject {
         activeTaskHandles.removeValue(forKey: taskId)
         lastSpeedSampleTime.removeValue(forKey: taskId)
         lastSampledBytes.removeValue(forKey: taskId)
+        pruneCompletedHistoryIfNeeded()
     }
     
     public func updateProgress(taskId: UUID, fraction: Double, transferredBytes: Int64? = nil) {

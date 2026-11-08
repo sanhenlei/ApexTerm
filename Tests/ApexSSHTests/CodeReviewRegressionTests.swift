@@ -1,6 +1,7 @@
 import XCTest
 @testable import ApexCore
 @testable import ApexSSH
+@testable import ApexTerminal
 @testable import ApexUI
 import AppKit
 import SwiftUI
@@ -535,5 +536,992 @@ final class CodeReviewRegressionTests: XCTestCase {
                       "App termination must clean up LocalTerminalSession PTY processes")
         XCTAssertTrue(appSource.contains("TransferManager.shared.cancelAllTasks()"),
                       "App termination must cancel active SFTP transfers")
+    }
+
+    // MARK: - TC-REV-28: SSH Key Vault materialization and passphrase fallback for SSH & Tunnels
+    @MainActor
+    func testSSHKeyVaultMaterializationAndPassphraseFallback() async throws {
+        let keyId = UUID()
+        let privRef = "vault.priv.\(keyId.uuidString)"
+        let passRef = "vault.pass.\(keyId.uuidString)"
+        let fakePEM = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmU=\n-----END OPENSSH PRIVATE KEY-----"
+
+        XCTAssertTrue(KeychainStore.isManagedReference(privRef))
+        XCTAssertTrue(KeychainStore.isManagedReference(passRef))
+        XCTAssertTrue(KeychainStore.isVaultPrivateKeyReference(privRef))
+        XCTAssertEqual(KeychainStore.vaultPassphraseReference(forPrivateKeyRef: privRef), passRef)
+
+        let tempVaultDir = FileManager.default.temporaryDirectory.appendingPathComponent("VaultMaterialize_\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempVaultDir) }
+
+        let materializedPath = SSHKeyVaultManager.materializePrivateKeyPath(
+            for: privRef,
+            directory: tempVaultDir,
+            lookup: { ref in ref == privRef ? fakePEM : nil }
+        )
+        let unwrappedPath = try XCTUnwrap(materializedPath)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: unwrappedPath))
+
+        let content = try String(contentsOfFile: unwrappedPath, encoding: .utf8)
+        XCTAssertTrue(content.hasSuffix("\n"), "Materialized OpenSSH private key must end with a trailing newline")
+        let attrs = try FileManager.default.attributesOfItem(atPath: unwrappedPath)
+        let perms = (attrs[.posixPermissions] as? NSNumber)?.uint16Value ?? 0
+        XCTAssertEqual(perms & 0o777, 0o600, "Materialized private key file must have 0600 permissions")
+
+        let session = Session(
+            name: "VaultKeyHost",
+            host: "10.0.0.10",
+            username: "ubuntu",
+            authMethod: .privateKey(keychainRef: privRef, passphraseRef: nil)
+        )
+        let secret = await SSHTunnelManager.resolveSecret(for: session) { ref in
+            if ref == passRef { return "vault-key-passphrase-123" }
+            return nil
+        }
+        XCTAssertEqual(secret, "vault-key-passphrase-123", "Vault key session without explicit passphraseRef must fall back to vault.pass.<UUID>")
+    }
+
+    // MARK: - TC-REV-29: Duplicating a session isolates Keychain secret references
+    @MainActor
+    func testDuplicateSessionIsolatesKeychainReferences() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("DupSessionTests_\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let store = SessionStore(baseDirectory: tempDir)
+
+        let origId = UUID()
+        let origRef = "ssh_\(origId.uuidString)"
+        let original = Session(
+            id: origId,
+            name: "Prod DB",
+            host: "10.0.1.5",
+            username: "postgres",
+            authMethod: .password(keychainRef: origRef)
+        )
+        store.addSession(original)
+
+        var simulatedKeychain: [String: String] = [origRef: "origin-secret-pw"]
+        let duplicate = store.duplicateSession(
+            original,
+            nameSuffix: " (副本)",
+            secretCloner: { oldRef, newRef in
+                if let val = simulatedKeychain[oldRef] {
+                    simulatedKeychain[newRef] = val
+                    return newRef
+                }
+                return newRef
+            }
+        )
+
+        XCTAssertNotEqual(duplicate.id, original.id)
+        XCTAssertEqual(duplicate.name, "Prod DB (副本)")
+        guard case .password(let dupRef) = duplicate.authMethod else {
+            return XCTFail("Expected password auth method on duplicated session")
+        }
+        XCTAssertNotEqual(dupRef, origRef, "Duplicated session must use its own dedicated Keychain reference")
+        XCTAssertEqual(dupRef, "ssh_\(duplicate.id.uuidString)")
+        XCTAssertEqual(simulatedKeychain[dupRef], "origin-secret-pw")
+    }
+
+    // MARK: - TC-REV-30: Deleting a session cleans up Keychain secrets, tunnels, and dangling jumpServerId
+    @MainActor
+    func testDeleteSessionCleansUpSecretsTunnelsAndJumpServerReferences() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("DeleteSessionTests_\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let store = SessionStore(baseDirectory: tempDir)
+        let tunnelManager = SSHTunnelManager(baseDirectory: tempDir)
+
+        let jumpId = UUID()
+        let jumpRef = "ssh_\(jumpId.uuidString)"
+        let jumpSession = Session(
+            id: jumpId,
+            name: "Bastion Host",
+            host: "1.1.1.1",
+            username: "jump",
+            authMethod: .password(keychainRef: jumpRef)
+        )
+        let appSession = Session(
+            name: "Inner App",
+            host: "10.0.0.2",
+            username: "app",
+            authMethod: .agent,
+            jumpServerId: jumpId
+        )
+        store.addSession(jumpSession)
+        store.addSession(appSession)
+
+        let tunnel = SSHTunnel(name: "Bastion SOCKS", type: .dynamic, sessionId: jumpId, bindPort: 11080)
+        try tunnelManager.addTunnel(tunnel)
+        XCTAssertEqual(tunnelManager.tunnels(for: jumpId).count, 1)
+
+        var deletedKeys: [String] = []
+        store.deleteSession(
+            id: jumpId,
+            tunnelManager: tunnelManager,
+            secretDeleter: { key in deletedKeys.append(key) }
+        )
+
+        XCTAssertNil(store.sessions.first(where: { $0.id == jumpId }))
+        XCTAssertTrue(deletedKeys.contains(jumpRef), "Deleting session must delete its managed Keychain secret")
+        XCTAssertTrue(tunnelManager.tunnels(for: jumpId).isEmpty, "Deleting session must remove associated SSH tunnels")
+        let remainingApp = try XCTUnwrap(store.sessions.first(where: { $0.id == appSession.id }))
+        XCTAssertNil(remainingApp.jumpServerId, "Deleting jump host session must clear dangling jumpServerId on dependent sessions")
+    }
+
+    // MARK: - TC-REV-31: Snippet unresolvedVariables detection for interactive parameter prompting
+    func testSnippetUnresolvedVariablesDetection() throws {
+        let dockerSnippet = Snippet(title: "Logs", command: "docker logs -f --tail 100 {{container}}")
+        XCTAssertEqual(dockerSnippet.unresolvedVariables(context: ["host": "1.2.3.4", "user": "root"]), ["container"])
+        XCTAssertTrue(dockerSnippet.unresolvedVariables(context: ["container": "nginx-proxy"]).isEmpty)
+
+        let portSnippet = Snippet(title: "Port Check", command: "ss -tulpn | grep {{port}}")
+        XCTAssertEqual(portSnippet.unresolvedVariables(context: ["host": "1.2.3.4", "user": "root"]), ["port"])
+
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let workspaceSource = try String(contentsOf: root.appendingPathComponent("Sources/ApexUI/Workspace/WorkspaceView.swift"), encoding: .utf8)
+        XCTAssertTrue(workspaceSource.contains("executeSnippet(snippet)"),
+                      "CommandPalette snippet execution must route through unified executeSnippet handler with variable prompt support")
+    }
+
+    // MARK: - TC-REV-32: SSHTunnelManager jump server (-J) arguments and path expansion
+    func testSSHTunnelBuildArgumentsWithJumpServerAndPathExpansion() {
+        let jump = Session(name: "Jump", host: "203.0.113.5", port: 2222, username: "bastion", authMethod: .agent)
+        let target = Session(
+            name: "Internal DB",
+            host: "10.10.0.8",
+            port: 22,
+            username: "dbadmin",
+            authMethod: .certificate(keychainRef: "~/.ssh/id_ed25519", certificatePath: "~/.ssh/id_ed25519-cert.pub", passphraseRef: nil),
+            jumpServerId: jump.id
+        )
+        let tunnel = SSHTunnel(name: "PG Tunnel", type: .local, sessionId: target.id, bindPort: 15432, targetHost: "127.0.0.1", targetPort: 5432)
+
+        let args = SSHTunnelManager.buildSSHArguments(tunnel: tunnel, session: target, jumpSession: jump)
+        if let jIdx = args.firstIndex(of: "-J"), jIdx + 1 < args.count {
+            XCTAssertEqual(args[jIdx + 1], "bastion@203.0.113.5:2222")
+        } else {
+            XCTFail("SSHTunnelManager.buildSSHArguments must include -J user@host:port when jumpSession is provided")
+        }
+        XCTAssertFalse(args.contains("~/.ssh/id_ed25519"), "Private key path must expand ~ before invoking Process")
+        XCTAssertFalse(args.contains("CertificateFile=~/.ssh/id_ed25519-cert.pub"), "Certificate path must expand ~ before invoking Process")
+    }
+
+    // MARK: - TC-REV-33: SessionLogger streaming UTF-8 decoding across split multi-byte chunks
+    func testSessionLoggerSplitMultiByteUTF8AndANSIFiltering() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("LoggerUTF8Tests_\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let session = Session(name: "UTF8Test", host: "10.0.0.1", username: "root")
+        let config = SessionLogConfig(autoLoggingEnabled: true, logDirectoryPath: tempDir.path, format: .plainText, maxFileSizeMB: 10)
+        let logger = SessionLogger(session: session, config: config)
+
+        // "\u{001B}[32m中文测试\u{001B}[0m\n" where "中" (E4 B8 AD) is split across two chunks!
+        let fullBytes = Array("\u{001B}[32m中文测试\u{001B}[0m\n".utf8)
+        // Find first byte of "中" (0xE4) and split right after 0xE4, 0xB8
+        let splitIndex = 6 // 5 bytes of "\x1B[32m" + 1st byte of "中" (0xE4)
+        let chunk1 = Data(fullBytes[0..<splitIndex])
+        let chunk2 = Data(fullBytes[splitIndex..<fullBytes.count])
+
+        logger.appendData(chunk1)
+        logger.appendData(chunk2)
+        logger.close()
+
+        let fileURL = try XCTUnwrap(logger.activeFileURL)
+        let loggedText = try String(contentsOf: fileURL, encoding: .utf8)
+        XCTAssertTrue(loggedText.contains("中文测试"), "Split multi-byte UTF-8 characters must be reassembled cleanly")
+        XCTAssertFalse(loggedText.contains("\u{001B}[32m"), "Split UTF-8 chunk must not bypass ANSI stripping in plainText mode")
+    }
+
+    // MARK: - TC-REV-34: AppSettings.resetToDefaults resets session audit logging properties
+    @MainActor
+    func testAppSettingsResetToDefaultsResetsLoggingProperties() {
+        let settings = AppSettings.shared
+        let prevEnabled = settings.isSessionLoggingEnabled
+        let prevFormat = settings.sessionLogFormat
+        let prevDir = settings.sessionLogDirectory
+        let prevMax = settings.sessionLogMaxFileSizeMB
+        defer {
+            settings.isSessionLoggingEnabled = prevEnabled
+            settings.sessionLogFormat = prevFormat
+            settings.sessionLogDirectory = prevDir
+            settings.sessionLogMaxFileSizeMB = prevMax
+        }
+
+        settings.isSessionLoggingEnabled = true
+        settings.sessionLogFormat = .rawAnsi
+        settings.sessionLogDirectory = "/tmp/custom_audit_logs"
+        settings.sessionLogMaxFileSizeMB = 200
+
+        settings.resetToDefaults()
+
+        XCTAssertFalse(settings.isSessionLoggingEnabled)
+        XCTAssertEqual(settings.sessionLogFormat, .plainText)
+        XCTAssertEqual(settings.sessionLogMaxFileSizeMB, 50)
+        XCTAssertTrue(settings.sessionLogDirectory.hasSuffix("AetherTerm/Logs"))
+    }
+
+    // MARK: - TC-REV-35: Broadcast mode filters connected panes and refreshes directory linkage
+    func testBroadcastModeFiltersConnectedPanesAndRefreshesLinkage() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let workspaceSource = try String(contentsOf: root.appendingPathComponent("Sources/ApexUI/Workspace/WorkspaceView.swift"), encoding: .utf8)
+        XCTAssertTrue(workspaceSource.contains("where p.connectionState == .connected"),
+                      "Broadcast mode must only send input to connected panes")
+    }
+
+    // MARK: - TC-REV-36: Copy-on-select setting respected by context menu and WorkspaceView binding
+    @MainActor
+    func testCopyOnSelectDisabledDoesNotClobberPasteboardOnContextMenu() throws {
+        let pasteboard = NSPasteboard.general
+        let savedItems = (pasteboard.pasteboardItems ?? []).map { original in
+            let copy = NSPasteboardItem()
+            for type in original.types {
+                if let data = original.data(forType: type) { copy.setData(data, forType: type) }
+            }
+            return copy
+        }
+        defer {
+            pasteboard.clearContents()
+            pasteboard.writeObjects(savedItems)
+        }
+
+        pasteboard.clearContents()
+        pasteboard.setString("keep-existing-clipboard", forType: .string)
+
+        let view = NativeTerminalView()
+        view.isCopyOnSelectEnabled = false
+        view.textStorage?.setAttributedString(NSAttributedString(string: "selected terminal text"))
+        view.setSelectedRange(NSRange(location: 0, length: 8))
+
+        _ = view.menu(for: NSEvent())
+        XCTAssertEqual(pasteboard.string(forType: .string), "keep-existing-clipboard",
+                       "Opening context menu with isCopyOnSelectEnabled == false must not overwrite clipboard")
+
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let workspaceSource = try String(contentsOf: root.appendingPathComponent("Sources/ApexUI/Workspace/WorkspaceView.swift"), encoding: .utf8)
+        XCTAssertTrue(workspaceSource.contains("isCopyOnSelectEnabled: themeSettings.isCopyOnSelectEnabled"),
+                      "PaneContainerView must pass themeSettings.isCopyOnSelectEnabled to TerminalRepresentable")
+    }
+
+    // MARK: - TC-REV-37: TerminalRingBuffer records standalone BEL (\u{07}) while ignoring OSC terminator BEL
+    @MainActor
+    func testTerminalBellDetectionAndVisualBellHandling() {
+        let buffer = TerminalRingBuffer(maxLines: 100)
+        XCTAssertFalse(buffer.consumeBellFlag())
+
+        // 1. OSC title sequence terminated by \u{07} must NOT trigger a terminal bell
+        buffer.appendStream("\u{1B}]0;user@host:~/project\u{07}prompt$ ")
+        XCTAssertFalse(buffer.consumeBellFlag(), "OSC sequence terminator BEL must not trigger terminal bell")
+
+        // 2. Standalone BEL (\u{07}) must set the pending bell flag and be consumed atomically once
+        buffer.appendStream("\u{07}")
+        XCTAssertTrue(buffer.consumeBellFlag(), "Standalone BEL character must set bell flag")
+        XCTAssertFalse(buffer.consumeBellFlag(), "consumeBellFlag must reset flag after consumption")
+
+        // 3. NativeTerminalView.refresh() consumes bell flag and increments bellTriggerCount
+        let prevBellMode = AppSettings.shared.bellMode
+        AppSettings.shared.bellMode = .visual
+        defer { AppSettings.shared.bellMode = prevBellMode }
+
+        let view = NativeTerminalView(frame: NSRect(x: 0, y: 0, width: 400, height: 300), textContainer: nil)
+        view.ringBuffer = buffer
+        buffer.appendStream("alert\u{07}\n")
+        view.refresh()
+        XCTAssertEqual(view.bellTriggerCount, 1)
+    }
+
+    // MARK: - TC-REV-38: TransferManager.clearCompleted removes failed tasks and cleans speed tracking dictionaries
+    @MainActor
+    func testTransferManagerClearCompletedRemovesFailedTasksAndCleansSamples() {
+        let manager = TransferManager(distributionChannel: .direct, maxConcurrentTransfers: 2)
+        let dummyURL = URL(fileURLWithPath: "/tmp/test-transfer.bin")
+
+        let completedId = manager.beginExternalTransfer(
+            fileName: "done.bin", remotePath: "/root/done.bin", localURL: dummyURL, direction: .upload, totalBytes: 100
+        )
+        manager.completeExternalTransfer(taskId: completedId)
+
+        let failedId = manager.beginExternalTransfer(
+            fileName: "failed.bin", remotePath: "/root/failed.bin", localURL: dummyURL, direction: .download, totalBytes: 200
+        )
+        manager.failExternalTransfer(taskId: failedId, error: NSError(domain: "SFTP", code: 1, userInfo: [NSLocalizedDescriptionKey: "Permission denied"]))
+
+        let activeId = manager.beginExternalTransfer(
+            fileName: "active.bin", remotePath: "/root/active.bin", localURL: dummyURL, direction: .upload, totalBytes: 500
+        )
+
+        XCTAssertTrue(manager.tasks.first(where: { $0.id == completedId })?.status.isTerminal == true)
+        XCTAssertTrue(manager.tasks.first(where: { $0.id == failedId })?.status.isTerminal == true)
+        XCTAssertFalse(manager.tasks.first(where: { $0.id == activeId })?.status.isTerminal == true)
+
+        manager.clearCompleted()
+
+        XCTAssertEqual(manager.tasks.map(\.id), [activeId], "clearCompleted() must remove completed, cancelled, and failed tasks while keeping active tasks")
+
+        manager.removeTask(id: activeId)
+        XCTAssertTrue(manager.tasks.isEmpty, "removeTask(id:) must cancel and remove the specified task")
+    }
+
+    // MARK: - TC-REV-39: VTParser and TerminalRingBuffer support colon-separated CSI SGR subparameters
+    func testVTParserAndRingBufferColonSeparatedSGRAndIntermediateCSI() {
+        let parser = VTParser()
+        // Colon-separated TrueColor (38:2:255:128:0 and ITU 38:2::0:200:100) + curly underline (4:3) + underline off (4:0) + DECSCUSR (\e[6 q)
+        let raw = "\u{1B}[6 q\u{1B}[38:2:255:128:0;4:3mOrangeUnder\u{1B}[4:0;38:2::0:200:100mGreenPlain\u{1B}[0m"
+        let spans = parser.parseANSI(raw)
+
+        XCTAssertEqual(spans.map(\.text).joined(), "OrangeUnderGreenPlain",
+                       "CSI sequences with colon subparameters or intermediate bytes must never leak into visible text")
+        XCTAssertEqual(spans.first?.foregroundColorHex, "#FF8000")
+        XCTAssertEqual(spans.first?.isUnderlined, true)
+        if spans.count >= 2 {
+            XCTAssertEqual(spans[1].foregroundColorHex, "#00C864")
+            XCTAssertEqual(spans[1].isUnderlined, false)
+        }
+
+        let buffer = TerminalRingBuffer(maxLines: 50)
+        buffer.appendStream("\u{1B}[38:2:255:128:0mColored\u{1B}[0m\r\n")
+        let lines = buffer.tailLines(count: 1)
+        XCTAssertEqual(lines.count, 1)
+        let parsedFromBuffer = parser.parseANSI(lines[0])
+        XCTAssertEqual(parsedFromBuffer.map(\.text).joined(), "Colored")
+    }
+
+    // MARK: - TC-REV-40: iCloudSyncManager.syncNow(withTemporaryStrategy:) restores conflictStrategy on error
+    @MainActor
+    func testICloudSyncTemporaryStrategyRestoresOnThrow() async {
+        final class UnavailableCloudBackend: iCloudStorageBackend, @unchecked Sendable {
+            func isCloudAvailable() -> Bool { false }
+            func readPayloadData() throws -> Data? { nil }
+            func writePayloadData(_ data: Data) throws {}
+            func readBackupData() throws -> Data? { nil }
+            func removePayloadData() throws {}
+            func lastModifiedDate() -> Date? { nil }
+            func cloudVaultURL() -> URL? { nil }
+        }
+
+        let manager = iCloudSyncManager(
+            storageBackend: UnavailableCloudBackend(),
+            conflictStrategy: .smartMerge
+        )
+        XCTAssertEqual(manager.conflictStrategy, .smartMerge)
+
+        do {
+            _ = try await manager.syncNow(withTemporaryStrategy: .overwriteCloud)
+            XCTFail("Expected cloudUnavailable error")
+        } catch {
+            // Expected throw
+        }
+
+        XCTAssertEqual(manager.conflictStrategy, .smartMerge,
+                       "conflictStrategy must be restored to original value even when syncNow throws")
+    }
+
+    // MARK: - TC-REV-41: SFTP parent navigation entry ("..") and root ("/") are excluded from destructive/modifiable operations
+    func testSFTPParentNavigationAndRootExcludedFromModifiableSelection() {
+        let parentEntry = SFTPItem(name: "..", path: "/var", isDirectory: true)
+        let rootEntry = SFTPItem(name: "/", path: "/", isDirectory: true)
+        let normalDir = SFTPItem(name: "logs", path: "/var/logs", isDirectory: true)
+        let normalFile = SFTPItem(name: "app.log", path: "/var/app.log", isDirectory: false, size: 1024)
+
+        XCTAssertTrue(parentEntry.isParentNavigationEntry)
+        XCTAssertFalse(parentEntry.isModifiableRemoteItem, "Parent directory entry '..' must never be deletable or modifiable")
+        XCTAssertFalse(rootEntry.isModifiableRemoteItem, "Root directory '/' must never be deletable or modifiable")
+        XCTAssertTrue(normalDir.isModifiableRemoteItem)
+        XCTAssertTrue(normalFile.isModifiableRemoteItem)
+
+        let allItems = [parentEntry, rootEntry, normalDir, normalFile]
+        let selectedPaths: Set<String> = ["/var", "/", "/var/logs", "/var/app.log"]
+        let modifiable = SFTPItem.modifiableSelection(from: allItems, selectedPaths: selectedPaths)
+        XCTAssertEqual(modifiable.map(\.path), ["/var/logs", "/var/app.log"],
+                       "Batch selection must filter out '..' and '/' to prevent accidental parent directory deletion")
+    }
+
+    // MARK: - TC-REV-42: SessionEditModal restores and syncs SSHKeyVault selection with privateKeyPath
+    func testSessionEditModalVaultKeyMatchingAndManualFallback() {
+        let idA = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let idB = UUID(uuidString: "66666666-7777-8888-9999-000000000000")!
+        let keyA = SSHKeyIdentity(
+            id: idA,
+            name: "Prod Key",
+            algorithm: .ed25519,
+            fingerprintSHA256: "SHA256:TestA",
+            publicKeyOpenSSH: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestA prod@host",
+            keychainPrivateKeyRef: "vault.priv.\(idA.uuidString)"
+        )
+        let keyB = SSHKeyIdentity(
+            id: idB,
+            name: "Staging Key",
+            algorithm: .rsa,
+            fingerprintSHA256: "SHA256:TestB",
+            publicKeyOpenSSH: "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQTestB staging@host",
+            keychainPrivateKeyRef: "vault.priv.\(idB.uuidString)"
+        )
+        let keys = [keyA, keyB]
+
+        // 1. Reopening a session with keyA's vault reference matches keyA.id
+        let matched = SessionEditModal.matchedVaultKeyId(forPrivateKeyPath: keyA.keychainPrivateKeyRef, keys: keys)
+        XCTAssertEqual(matched, keyA.id)
+
+        // 2. Manual filesystem path returns nil
+        XCTAssertNil(SessionEditModal.matchedVaultKeyId(forPrivateKeyPath: "~/.ssh/id_ed25519", keys: keys))
+
+        // 3. Switching picker from a Vault key back to manual (nil) clears the stale vault.priv.<UUID> reference
+        let clearedPath = SessionEditModal.resolvedPrivateKeyPathAfterPickerChange(
+            selectedVaultKeyId: nil,
+            currentPath: keyA.keychainPrivateKeyRef,
+            keys: keys
+        )
+        XCTAssertEqual(clearedPath, "")
+
+        // 4. Switching picker to keyB updates privateKeyPath to keyB's keychain ref
+        let updatedPath = SessionEditModal.resolvedPrivateKeyPathAfterPickerChange(
+            selectedVaultKeyId: keyB.id,
+            currentPath: "~/.ssh/id_ed25519",
+            keys: keys
+        )
+        XCTAssertEqual(updatedPath, keyB.keychainPrivateKeyRef)
+    }
+
+    // MARK: - TC-REV-43: ProcessDetailItem protects full-path critical daemons and parses non-systemd hosts cleanly
+    func testProcessInspectorFullPathProtectionAndNonSystemdProbe() {
+        let fullPathSshd = ProcessDetailItem(
+            pid: 512,
+            user: "root",
+            cpuPercent: 0.2,
+            memPercent: 0.4,
+            rssBytes: 4096 * 1024,
+            vszBytes: 81920 * 1024,
+            state: .sleeping,
+            command: "/usr/sbin/sshd",
+            fullCommandLine: "/usr/sbin/sshd -D"
+        )
+        let fullPathLaunchd = ProcessDetailItem(
+            pid: 300,
+            user: "root",
+            cpuPercent: 0.1,
+            memPercent: 0.2,
+            rssBytes: 2048 * 1024,
+            vszBytes: 40960 * 1024,
+            state: .sleeping,
+            command: "/sbin/launchd",
+            fullCommandLine: "/sbin/launchd"
+        )
+        XCTAssertTrue(fullPathSshd.isProtected, "Full-path /usr/sbin/sshd must be protected against accidental kill")
+        XCTAssertTrue(fullPathLaunchd.isProtected, "Full-path /sbin/launchd must be protected against accidental kill")
+
+        // ps output with full path in comm column normalizes command to binary basename while preserving fullCommandLine
+        let psSample = """
+          512 root       0.2  0.4   4096  81920 Ss   /usr/sbin/sshd   /usr/sbin/sshd -D -o UseDNS=no
+          901 www-data   1.5  2.0  32768 128000 S    /usr/local/bin/node /usr/local/bin/node server.js
+        """
+        let parsed = ProcessListParser.parsePSOutput(psSample)
+        XCTAssertEqual(parsed.count, 2)
+        XCTAssertEqual(parsed[0].command, "sshd")
+        XCTAssertEqual(parsed[0].fullCommandLine, "/usr/sbin/sshd -D -o UseDNS=no")
+        XCTAssertTrue(parsed[0].isProtected)
+        XCTAssertEqual(parsed[1].command, "node")
+        XCTAssertEqual(parsed[1].fullCommandLine, "/usr/local/bin/node server.js")
+        XCTAssertFalse(parsed[1].isProtected)
+
+        // Non-systemd hosts guard systemctl with command -v systemctl and produce empty service list on empty output
+        XCTAssertTrue(AgentlessMonitor.systemdServicesProbeCommand().contains("command -v systemctl"))
+        XCTAssertTrue(ProcessListParser.parseSystemdServices("").isEmpty)
+    }
+
+    // MARK: - TC-REV-44: SSHTunnel brackets IPv6 forwarding hosts and isolates remote (-R) vs local (-L/-D) port conflicts
+    @MainActor
+    func testSSHTunnelIPv6BracketingAndRemotePortConflictIsolation() throws {
+        let sessionA = Session(name: "Node A", host: "2001:db8::10", port: 22, username: "root", authMethod: .agent)
+        let sessionB = Session(name: "Node B", host: "10.0.0.2", port: 22, username: "root", authMethod: .agent)
+
+        let ipv6Local = SSHTunnel(
+            name: "IPv6 Local",
+            type: .local,
+            sessionId: sessionA.id,
+            bindHost: "::1",
+            bindPort: 8080,
+            targetHost: "2001:db8::20",
+            targetPort: 80
+        )
+        XCTAssertEqual(ipv6Local.openSSHSpecifier, "-L [::1]:8080:[2001:db8::20]:80")
+
+        let args = SSHTunnelManager.buildSSHArguments(tunnel: ipv6Local, session: sessionA)
+        XCTAssertTrue(args.contains("[::1]:8080:[2001:db8::20]:80"))
+        XCTAssertTrue(args.contains("root@[2001:db8::10]"))
+
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("TunnelConflictTest_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let manager = SSHTunnelManager(baseDirectory: tempDir)
+        let local8080 = SSHTunnel(name: "Local 8080", type: .local, sessionId: sessionA.id, bindHost: "127.0.0.1", bindPort: 8080, targetHost: "localhost", targetPort: 80)
+        let remote8080A = SSHTunnel(name: "Remote 8080 on A", type: .remote, sessionId: sessionA.id, bindHost: "127.0.0.1", bindPort: 8080, targetHost: "localhost", targetPort: 3000)
+        let remote8080B = SSHTunnel(name: "Remote 8080 on B", type: .remote, sessionId: sessionB.id, bindHost: "127.0.0.1", bindPort: 8080, targetHost: "localhost", targetPort: 3000)
+        let remote8080ADup = SSHTunnel(name: "Remote 8080 on A Dup", type: .remote, sessionId: sessionA.id, bindHost: "127.0.0.1", bindPort: 8080, targetHost: "localhost", targetPort: 4000)
+
+        // Local 8080 and Remote 8080 bind on different machines and must not conflict
+        XCTAssertNoThrow(try manager.addTunnel(local8080))
+        XCTAssertNoThrow(try manager.addTunnel(remote8080A))
+        // Remote 8080 on Session B binds on a different remote server and must not conflict with Session A
+        XCTAssertNoThrow(try manager.addTunnel(remote8080B))
+        // Duplicate Remote 8080 on the SAME Session A must conflict
+        XCTAssertThrowsError(try manager.addTunnel(remote8080ADup))
+    }
+
+    // MARK: - TC-REV-45: SSHConfigHost.mergedSession preserves existing user customizations on re-import
+    func testSSHConfigMergedSessionPreservesCustomizations() {
+        let existingId = UUID()
+        let jumpId = UUID()
+        let created = Date(timeIntervalSince1970: 1_700_000_000)
+        let lastConnected = Date(timeIntervalSince1970: 1_700_050_000)
+
+        let existing = Session(
+            id: existingId,
+            name: "prod-api",
+            host: "10.0.1.10",
+            port: 22,
+            username: "ubuntu",
+            authMethod: .privateKey(keychainRef: "/Users/test/.ssh/id_ed25519", passphraseRef: "session.pass.existing"),
+            folder: "核心生产",
+            tags: ["SSHConfig", "K8s", "主节点"],
+            colorHex: "#FF5500",
+            jumpServerId: jumpId,
+            keepAliveIntervalSeconds: 45,
+            terminalType: .vt100,
+            createdAt: created,
+            lastConnectedAt: lastConnected
+        )
+
+        let hostEntry = SSHConfigHost(
+            hostPattern: "prod-api",
+            hostName: "10.0.1.99",
+            user: "deploy",
+            port: 2222,
+            identityFile: "/Users/test/.ssh/id_ed25519"
+        )
+
+        let merged = hostEntry.mergedSession(updating: existing, folder: "SSH Config 导入")
+
+        XCTAssertEqual(merged.id, existingId)
+        XCTAssertEqual(merged.host, "10.0.1.99")
+        XCTAssertEqual(merged.port, 2222)
+        XCTAssertEqual(merged.username, "deploy")
+        // Preserves existing folder, color, terminalType, keepAliveIntervalSeconds, jumpServerId, timestamps, custom tags, and passphraseRef
+        XCTAssertEqual(merged.folder, "核心生产")
+        XCTAssertEqual(merged.colorHex, "#FF5500")
+        XCTAssertEqual(merged.terminalType, .vt100)
+        XCTAssertEqual(merged.keepAliveIntervalSeconds, 45)
+        XCTAssertEqual(merged.jumpServerId, jumpId)
+        XCTAssertEqual(merged.createdAt, created)
+        XCTAssertEqual(merged.lastConnectedAt, lastConnected)
+        XCTAssertTrue(merged.tags.contains("K8s"))
+        XCTAssertTrue(merged.tags.contains("主节点"))
+        XCTAssertEqual(merged.passphraseRef, "session.pass.existing")
+    }
+
+    // MARK: - TC-REV-46: Session startup bootstrap escapes multiline/control characters and guards auto-reconnect duplicate execution
+    func testSessionStartupBootstrapSanitizationAndSingleLineSafety() {
+        let session = Session(
+            name: "Bootstrap Guard",
+            host: "10.0.0.5",
+            username: "root",
+            initialWorkingDirectory: "  /srv/my app  ",
+            startupCommand: "  echo hello\r\nwhoami  ",
+            environmentVariables: [
+                "NORMAL_KEY": "val1",
+                "INJECT;KEY": "ignored"
+            ]
+        )
+        let bootstrap = SessionStartupHelper.buildBootstrapCommand(for: session)
+        XCTAssertEqual(bootstrap, "export NORMAL_KEY='val1' && cd '/srv/my app' && echo hello; whoami")
+    }
+
+    // MARK: - TC-REV-47: ListeningPortItem handles IPv4-mapped IPv6 addresses and avoids existing local tunnel port collisions
+    func testListeningPortIPv4MappedIPv6AndCollisionFreeLocalTunnel() {
+        let mappedLoopback = ListeningPortItem(proto: "TCP", bindAddress: "::ffff:127.0.0.1", port: 8080, pid: 900, processName: "java")
+        let mappedWildcard = ListeningPortItem(proto: "TCP", bindAddress: "::ffff:0.0.0.0", port: 9090, pid: 901, processName: "prometheus")
+        XCTAssertFalse(mappedLoopback.isPubliclyExposed, "::ffff:127.0.0.1 is IPv4-mapped loopback and must not be marked publicly exposed")
+        XCTAssertTrue(mappedWildcard.isPubliclyExposed, "::ffff:0.0.0.0 is IPv4-mapped wildcard and must be marked publicly exposed")
+        XCTAssertEqual(mappedLoopback.endpointDisplay, "[::ffff:127.0.0.1]:8080")
+
+        let sid = UUID()
+        let existingTunnel = SSHTunnel(name: "Existing 8080", type: .local, sessionId: sid, bindHost: "127.0.0.1", bindPort: 8080, targetHost: "127.0.0.1", targetPort: 80)
+        let candidate = mappedLoopback.toLocalForwardingTunnel(sessionId: sid, existingTunnels: [existingTunnel])
+        XCTAssertEqual(candidate.bindPort, 8081, "toLocalForwardingTunnel must pick the next free local port when 8080 is already bound by an existing local tunnel")
+        XCTAssertEqual(candidate.targetPort, 8080)
+    }
+
+    // MARK: - TC-REV-48: SFTPInspectorHelper preserves compound archive extensions (.tar.gz) and parses binary-mode shasum output
+    func testSFTPInspectorCompoundArchiveDuplicateNameAndBinaryModeHash() {
+        let dupArchive = SFTPInspectorHelper.defaultDuplicateName(
+            for: "bundle.tar.gz",
+            isDirectory: false,
+            existingNames: ["bundle.tar.gz"]
+        )
+        XCTAssertEqual(dupArchive, "bundle copy.tar.gz")
+
+        let binaryModeLine = "343ec64901780508b7e1cdc2af93cc6eebebcd0d0b6cd906b91772822afd3311 *AetherTerm.tar.gz\r\n"
+        XCTAssertEqual(
+            SFTPInspectorHelper.parseChecksumOutput(binaryModeLine, algorithm: .sha256),
+            "343ec64901780508b7e1cdc2af93cc6eebebcd0d0b6cd906b91772822afd3311"
+        )
+    }
+
+    // MARK: - TC-REV-49: Split-packet OSC 133 ST (\e\\) terminator reassembly and dangling command auto-close on next prompt
+    func testOSC133SplitPacketSTTerminatorAndDanglingCommandAutoClose() {
+        let ring = TerminalRingBuffer(maxLines: 200)
+        // Packet 1 ends mid-ST terminator (\e without trailing \\)
+        ring.appendStream("\u{1B}]133;A\u{1B}")
+        ring.appendStream("\\$ uname -s\u{1B}]133;C;uname -s\u{1B}")
+        ring.appendStream("\\\r\nLinux\r\n")
+        // Next prompt arrives without an explicit 133;D
+        ring.appendStream("\u{1B}]133;A\u{07}$ ")
+
+        XCTAssertEqual(ring.allLines(), ["$ uname -s", "Linux", "$ "])
+        XCTAssertEqual(ring.shellIntegration.allRecords().count, 1)
+        XCTAssertEqual(ring.shellIntegration.lastCompletedRecord?.commandText, "uname -s")
+        XCTAssertEqual(ring.extractLastOSC133CommandOutput(), "Linux")
+    }
+
+    // MARK: - TC-REV-50: KnownHostsManager preserves sibling hosts on comma-separated lines and normalizes [host]:22 in conflict detection
+    func testKnownHostsCommaSeparatedSiblingPreservationAndPort22ConflictNormalization() throws {
+        let keyA = "AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+        let keyB = "AAAAC3NzaC1lZDI1NTE5AAAAIBX9p7wK8vL2mN4qR6sT8uV0wX2yZ4aB6cD8eF0gH2iJ"
+
+        // 1. [host]:22 and bare host must be normalized to the same endpoint for conflict detection
+        let entries = KnownHostsManager.parse(content: """
+        [git.internal]:22 ssh-ed25519 \(keyA)
+        git.internal ssh-ed25519 \(keyB)
+        """)
+        let conflicts = KnownHostsManager.detectConflicts(in: entries)
+        XCTAssertEqual(conflicts.count, 1)
+        XCTAssertEqual(conflicts[0].endpoint, "git.internal")
+
+        // 2. Removing one host from a comma-separated line must preserve sibling hosts on that line
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("kh-sibling-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let khFile = tempDir.appendingPathComponent("known_hosts")
+        try "github.com,140.82.112.4 ssh-ed25519 \(keyA) multi-host\n".write(to: khFile, atomically: true, encoding: .utf8)
+
+        let manager = KnownHostsManager(fileURL: khFile)
+        let modified = try manager.removeEntries(matchingEndpoint: "140.82.112.4", port: 22)
+        XCTAssertEqual(modified, 1)
+        XCTAssertEqual(manager.entries.count, 1)
+        XCTAssertEqual(manager.entries[0].hostPattern, "github.com")
+        XCTAssertEqual(manager.entries[0].comment, "multi-host")
+    }
+
+    // MARK: - TC-REV-51: SessionBundleExporter remaps jumpServerId to existing local bastion UUID and disambiguates duplicate OpenSSH Host aliases
+    @MainActor
+    func testSessionBundleJumpServerIDRemappingAndDuplicateHostAliasDisambiguation() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("pack-remap-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let store = SessionStore(baseDirectory: tempDir)
+        let localBastion = Session(name: "Bastion", host: "1.2.3.4", port: 22, username: "ops", authMethod: .agent)
+        store.addSession(localBastion)
+
+        let incomingBastion = Session(name: "Bastion", host: "1.2.3.4", port: 22, username: "ops", authMethod: .agent)
+        let incomingTarget = Session(
+            name: "Private DB",
+            host: "10.0.0.99",
+            port: 22,
+            username: "postgres",
+            authMethod: .agent,
+            jumpServerId: incomingBastion.id
+        )
+
+        let packData = try SessionBundleExporter.exportSharePackData(sessions: [incomingBastion, incomingTarget])
+        _ = try SessionBundleExporter.importSharePackData(packData, into: store, overwriteExisting: false)
+
+        let importedTarget = store.sessions.first(where: { $0.name == "Private DB" })
+        XCTAssertNotNil(importedTarget)
+        XCTAssertEqual(
+            importedTarget?.jumpServerId,
+            localBastion.id,
+            "When incoming bastion matches an existing local session, imported target's jumpServerId must be remapped to the existing local bastion ID"
+        )
+
+        // Duplicate session names must produce distinct Host aliases in OpenSSH config
+        let dup1 = Session(name: "web-node", host: "10.0.1.1", username: "root", authMethod: .agent)
+        let dup2 = Session(name: "web-node", host: "10.0.1.2", username: "root", authMethod: .agent)
+        let config = SessionBundleExporter.generateOpenSSHConfig(from: [dup1, dup2])
+        XCTAssertTrue(config.contains("Host web-node\n"))
+        XCTAssertTrue(config.contains("Host web-node-2\n"))
+    }
+
+    // MARK: - TC-REV-52: TerminalRingBuffer.clear() and RIS reset (\e c) immediately reclaim backing scrollback strings and reset OSC 133 records
+    func testRingBufferClearAndResetReclaimBackingStringsAndShellIntegration() {
+        let ring = TerminalRingBuffer(maxLines: 100)
+        for i in 0..<60 {
+            ring.appendStream("\u{1B}]133;A\u{07}$ echo line-\(i)\r\n\u{1B}]133;B\u{07}\u{1B}]133;C\u{07}output-\(i)\r\n\u{1B}]133;D;0\u{07}")
+        }
+        XCTAssertGreaterThan(ring.nonEmptyBackingSlotCount, 50)
+        XCTAssertFalse(ring.shellIntegration.allRecords().isEmpty)
+
+        ring.clear()
+        XCTAssertEqual(ring.lineCount, 0)
+        XCTAssertEqual(ring.nonEmptyBackingSlotCount, 0, "clear() must release all retained strings in backing scrollback slots")
+        XCTAssertTrue(ring.shellIntegration.allRecords().isEmpty, "clear() must reset OSC 133 shell integration records")
+
+        // Verify RIS full terminal reset (\u{1B}c) also reclaims backing scrollback strings
+        ring.appendLines((0..<40).map { "persisted-payload-\($0)" })
+        XCTAssertEqual(ring.nonEmptyBackingSlotCount, 40)
+        ring.appendStream("\u{1B}c")
+        XCTAssertEqual(ring.nonEmptyBackingSlotCount, 0, "RIS terminal reset (\\ec) must release all retained strings in backing scrollback slots")
+    }
+
+    // MARK: - TC-REV-53: NativeTerminalView.colorCache enforces 1024-entry upper bound under 24-bit TrueColor floods
+    @MainActor
+    func testNativeTerminalViewColorCacheEnforcesUpperBound() {
+        NativeTerminalView.clearColorCache()
+        XCTAssertEqual(NativeTerminalView.cachedColorCount, 0)
+
+        let scrollView = NativeTerminalScrollView(frame: NSRect(x: 0, y: 0, width: 640, height: 400))
+        defer { scrollView.tearDown() }
+
+        for i in 0..<1500 {
+            let r = (i * 37) & 0xFF
+            let g = (i * 73) & 0xFF
+            let b = (i * 109) & 0xFF
+            _ = scrollView.terminalView.formatANSI("\u{1B}[38;2;\(r);\(g);\(b)mX\u{1B}[0m")
+        }
+
+        XCTAssertLessThanOrEqual(
+            NativeTerminalView.cachedColorCount,
+            NativeTerminalView.maxColorCacheEntries,
+            "Static TrueColor cache must never exceed \(NativeTerminalView.maxColorCacheEntries) entries"
+        )
+        XCTAssertGreaterThan(NativeTerminalView.cachedColorCount, 0)
+    }
+
+    // MARK: - TC-REV-54: NativeTerminalScrollView.tearDown() detaches ringBuffer callbacks, clears textStorage, and breaks references
+    @MainActor
+    func testNativeTerminalScrollViewTearDownCleansUpCallbacksAndStorage() {
+        let ring = TerminalRingBuffer(maxLines: 100)
+        ring.appendLines(["line 1", "line 2", "line 3"])
+
+        let scrollView = NativeTerminalScrollView(frame: NSRect(x: 0, y: 0, width: 640, height: 400))
+        scrollView.terminalView.ringBuffer = ring
+        ring.onUpdate = {
+            // Simulated update callback
+        }
+        scrollView.terminalView.refresh()
+        XCTAssertGreaterThan(scrollView.terminalView.textStorage?.length ?? 0, 0)
+        XCTAssertNotNil(ring.onUpdate)
+
+        scrollView.tearDown()
+        XCTAssertNil(ring.onUpdate, "tearDown() must detach ringBuffer.onUpdate to prevent zombie UI refreshes")
+        XCTAssertNil(scrollView.terminalView.ringBuffer)
+        XCTAssertNil(scrollView.searchBarOverlay.terminalView)
+        XCTAssertEqual(scrollView.terminalView.textStorage?.length ?? -1, 0, "tearDown() must empty NSTextStorage")
+    }
+
+    // MARK: - TC-REV-55: TerminalFontManager.availableFonts(forceRefresh: true) completes in < 150ms without blocking main thread on CJK fonts
+    @MainActor
+    func testTerminalFontManagerFastEnumerationUnder150ms() {
+        let start = CFAbsoluteTimeGetCurrent()
+        let fonts = TerminalFontManager.shared.availableFonts(forceRefresh: true)
+        let elapsedMs = (CFAbsoluteTimeGetCurrent() - start) * 1000.0
+
+        XCTAssertFalse(fonts.isEmpty)
+        XCTAssertTrue(fonts.contains(where: { $0.familyName == "Menlo" || $0.familyName == "SF Mono" || $0.familyName == "Monaco" }))
+        XCTAssertLessThan(
+            elapsedMs,
+            150.0,
+            "Font discovery must pre-filter non-monospace families and finish in < 150ms on the main thread (actual: \(String(format: "%.2f", elapsedMs))ms)"
+        )
+    }
+
+    // MARK: - TC-REV-56: TerminalTabItem.tearDown() and closePane(id:) cancel auto-reconnect, clear ringBuffer/metricsHistory, and prevent zombie reconnect
+    @MainActor
+    func testTerminalTabAndPaneTearDownPreventsZombieAutoReconnectAndReclaimsMemory() async {
+        let session = Session(name: "Prod Node", host: "10.0.0.12", port: 22, username: "root", authMethod: .agent)
+        let mockClient = MockSSHSession(session: session)
+        let tab = TerminalTabItem(session: session, sshClient: mockClient)
+        guard let primaryPane = tab.panes.first else {
+            XCTFail("Expected primary pane")
+            return
+        }
+
+        primaryPane.ringBuffer.appendLines(["boot log 1", "boot log 2", "boot log 3"])
+        tab.metricsHistory.append(
+            ServerMetricsSnapshot(
+                cpuUsagePercent: 42.0,
+                memoryTotalBytes: 8_000_000_000,
+                memoryUsedBytes: 4_000_000_000,
+                networkRxBytesPerSec: 1024,
+                networkTxBytesPerSec: 2048,
+                diskTotalBytes: 100_000_000_000,
+                diskUsedBytes: 50_000_000_000
+            )
+        )
+        XCTAssertEqual(primaryPane.ringBuffer.nonEmptyBackingSlotCount, 3)
+        XCTAssertEqual(tab.metricsHistory.snapshots.count, 1)
+
+        // Simulate connected state followed by unexpected network drop to trigger auto-reconnect timer
+        primaryPane.connectionState = .connected
+        XCTAssertTrue(primaryPane.hasEverConnected)
+
+        var reconnectTriggered = false
+        primaryPane.onAutoReconnectRequested = { _ in
+            reconnectTriggered = true
+        }
+
+        tab.tearDown()
+
+        XCTAssertTrue(tab.isTornDown)
+        XCTAssertTrue(primaryPane.isTornDown)
+        XCTAssertFalse(primaryPane.isAutoReconnecting)
+        XCTAssertNil(primaryPane.onAutoReconnectRequested)
+        XCTAssertNil(primaryPane.onConnectionStateChanged)
+        XCTAssertEqual(primaryPane.ringBuffer.nonEmptyBackingSlotCount, 0, "tab.tearDown() must reclaim pane ringBuffer strings")
+        XCTAssertTrue(tab.metricsHistory.snapshots.isEmpty, "tab.tearDown() must clear tab metricsHistory snapshots")
+        XCTAssertFalse(reconnectTriggered)
+    }
+
+    // MARK: - TC-REV-57: NativeSSHSession.writePTYInput preserves all bytes on O_NONBLOCK descriptor under EAGAIN pressure
+    func testWritePTYInputOnNonBlockingDescriptorRetriesOnEAGAINWithoutDroppingBytes() async throws {
+        let pipe = Pipe()
+        let writeFd = pipe.fileHandleForWriting.fileDescriptor
+        let flags = fcntl(writeFd, F_GETFL)
+        XCTAssertGreaterThanOrEqual(flags, 0)
+        _ = fcntl(writeFd, F_SETFL, flags | O_NONBLOCK)
+
+        // 256 KB payload exceeds typical 64 KB macOS pipe buffer, forcing EAGAIN on O_NONBLOCK write
+        let payload = Data(String(repeating: "0123456789abcdef-nonblock-paste-line\n", count: 7_500).utf8)
+        let writer = Task.detached {
+            NativeSSHSession.writePTYInput(payload, to: writeFd)
+            try? pipe.fileHandleForWriting.close()
+        }
+
+        var received = Data()
+        let readHandle = pipe.fileHandleForReading
+        while true {
+            try await Task.sleep(nanoseconds: 2_000_000) // 2ms slow reader to provoke EAGAIN on writer
+            let chunk = readHandle.availableData
+            if chunk.isEmpty { break }
+            received.append(chunk)
+        }
+        await writer.value
+        XCTAssertEqual(received.count, payload.count, "Non-blocking PTY write must retry on EAGAIN and never truncate large pastes")
+        XCTAssertEqual(received, payload)
+    }
+
+    // MARK: - TC-REV-58: TransferManager automatically prunes oldest completed/failed/cancelled task history beyond maxCompletedHistory
+    @MainActor
+    func testTransferManagerPrunesCompletedHistoryBeyondCapWhilePreservingActiveTasks() {
+        let manager = TransferManager(maxCompletedHistory: 5)
+        let tempURL = URL(fileURLWithPath: "/tmp/transfer-cap-test.bin")
+
+        // 1. Start one active external transfer that must NOT be pruned
+        let activeId = manager.beginExternalTransfer(
+            fileName: "active-live.iso",
+            remotePath: "/remote/active-live.iso",
+            localURL: tempURL,
+            direction: .upload,
+            totalBytes: 10_000
+        )
+
+        // 2. Complete 10 external transfers (exceeding maxCompletedHistory = 5)
+        var completedIds: [UUID] = []
+        for i in 1...10 {
+            let tid = manager.beginExternalTransfer(
+                fileName: "done-\(i).tar.gz",
+                remotePath: "/remote/done-\(i).tar.gz",
+                localURL: tempURL,
+                direction: .download,
+                totalBytes: 1024
+            )
+            manager.completeExternalTransfer(taskId: tid)
+            completedIds.append(tid)
+        }
+
+        let terminalTasks = manager.tasks.filter { $0.status.isTerminal }
+        XCTAssertEqual(terminalTasks.count, 5, "Completed task history must be capped at maxCompletedHistory (5)")
+        XCTAssertTrue(manager.tasks.contains(where: { $0.id == activeId && $0.status == .transferring }), "Active transferring tasks must never be pruned")
+
+        // The 5 most recent completed tasks (6...10) must be retained, and the oldest 5 (1...5) pruned
+        for recentId in completedIds.suffix(5) {
+            XCTAssertTrue(terminalTasks.contains(where: { $0.id == recentId }))
+        }
+        for oldId in completedIds.prefix(5) {
+            XCTAssertFalse(terminalTasks.contains(where: { $0.id == oldId }))
+        }
+    }
+
+    // MARK: - TC-REV-59: SFTPView shared DateFormatter formats 5,000 rows in < 80ms and SFTPDragExportHelper prunes stale temp folders
+    @MainActor
+    func testSFTPSharedRowDateFormatterSpeedAndStaleDragExportDirectoryCleanup() throws {
+        let sampleDate = Date(timeIntervalSince1970: 1_762_560_000)
+        let start = CFAbsoluteTimeGetCurrent()
+        for _ in 0..<5_000 {
+            _ = SFTPView.formatRowDate(sampleDate)
+        }
+        let elapsedMs = (CFAbsoluteTimeGetCurrent() - start) * 1000.0
+        XCTAssertLessThan(elapsedMs, 80.0, "Shared static DateFormatter must format 5,000 SFTP rows in < 80ms (actual: \(String(format: "%.2f", elapsedMs))ms)")
+
+        let tempRoot = FileManager.default.temporaryDirectory.appendingPathComponent("sftp-drag-cleanup-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let staleDir = tempRoot.appendingPathComponent("stale-uuid", isDirectory: true)
+        let freshDir = tempRoot.appendingPathComponent("fresh-uuid", isDirectory: true)
+        try FileManager.default.createDirectory(at: staleDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: freshDir, withIntermediateDirectories: true)
+
+        let now = Date()
+        try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-7200)], ofItemAtPath: staleDir.path)
+        try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-60)], ofItemAtPath: freshDir.path)
+
+        let removed = SFTPDragExportHelper.cleanupStaleDragExportDirectories(in: tempRoot, olderThan: 3600, now: now)
+        XCTAssertEqual(removed, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staleDir.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: freshDir.path))
+    }
+
+    // MARK: - TC-REV-60: SessionEditModal.inspectCertificateFile caches certificate metadata cleanly on path change
+    func testSessionEditModalInspectCertificateFile() throws {
+        let emptyInfo = SessionEditModal.inspectCertificateFile(atPath: "   ")
+        XCTAssertFalse(emptyInfo.isValid)
+
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("cert-inspect-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let certFile = tempDir.appendingPathComponent("id_ed25519-cert.pub")
+        try "ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29t prod-ops@corp\n".write(to: certFile, atomically: true, encoding: .utf8)
+
+        let validInfo = SessionEditModal.inspectCertificateFile(atPath: certFile.path)
+        XCTAssertTrue(validInfo.isValid)
+        XCTAssertEqual(validInfo.keyType, "ssh-ed25519-cert-v01@openssh.com")
+        XCTAssertEqual(validInfo.comment, "prod-ops@corp")
+    }
+
+    // MARK: - TC-REV-61: SessionStore.importSessionsJSON sanitizes dangling and self-referential jumpServerId links
+    @MainActor
+    func testSessionStoreImportSanitizesDanglingAndSelfReferentialJumpServerIds() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("store-sanitize-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let store = SessionStore(baseDirectory: tempDir)
+        let bastion = Session(name: "Valid Bastion", host: "1.1.1.1", port: 22, username: "ops", authMethod: .agent)
+        let validTarget = Session(name: "App Node", host: "10.0.0.2", port: 22, username: "app", authMethod: .agent, jumpServerId: bastion.id)
+        let danglingTarget = Session(name: "Orphan Node", host: "10.0.0.3", port: 22, username: "app", authMethod: .agent, folder: "   ", jumpServerId: UUID())
+        let selfRefId = UUID()
+        let selfRefTarget = Session(id: selfRefId, name: "Loop Node", host: "10.0.0.4", port: 22, username: "app", authMethod: .agent, jumpServerId: selfRefId)
+
+        let data = try JSONEncoder().encode([bastion, validTarget, danglingTarget, selfRefTarget])
+        _ = try store.importSessionsJSON(from: data, overwrite: true)
+
+        XCTAssertEqual(store.sessions.first(where: { $0.name == "App Node" })?.jumpServerId, bastion.id, "Valid bastion jumpServerId must be preserved")
+        XCTAssertNil(store.sessions.first(where: { $0.name == "Orphan Node" })?.jumpServerId, "Dangling jumpServerId pointing to missing session must be cleared")
+        XCTAssertEqual(store.sessions.first(where: { $0.name == "Orphan Node" })?.folder, "常用会话", "Blank folder must be normalized to 常用会话")
+        XCTAssertNil(store.sessions.first(where: { $0.name == "Loop Node" })?.jumpServerId, "Self-referential jumpServerId must be cleared")
     }
 }

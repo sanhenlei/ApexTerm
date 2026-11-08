@@ -244,6 +244,9 @@ public final class NativeSSHSession: SSHSessionProtocol, @unchecked Sendable {
     }
 
     public static func expandPath(_ path: String) -> String {
+        if KeychainStore.isVaultPrivateKeyReference(path) {
+            return SSHKeyVaultManager.materializePrivateKeyPath(for: path) ?? path
+        }
         if path.hasPrefix("~/") {
             let home = FileManager.default.homeDirectoryForCurrentUser.path
             return home + "/" + String(path.dropFirst(2))
@@ -298,7 +301,8 @@ public final class NativeSSHSession: SSHSessionProtocol, @unchecked Sendable {
     /// Every child operation owns its grant independently, including cancellation cleanup.
     func acquirePrivateKeyAccess() throws -> FileAccessLease? {
         guard distributionChannel == .appStore,
-              let path = session.privateKeyPath, !path.isEmpty else { return nil }
+              let path = session.privateKeyPath, !path.isEmpty,
+              !KeychainStore.isVaultPrivateKeyReference(path) else { return nil }
         let access = try fileAccessStore.acquire(URL(fileURLWithPath: Self.expandPath(path)))
         guard FileManager.default.isReadableFile(atPath: access.url.path) else {
             access.close()
@@ -783,15 +787,24 @@ public final class NativeSSHSession: SSHSessionProtocol, @unchecked Sendable {
         }
     }
 
-    static func writePTYInput(_ data: Data, to descriptor: Int32) {
+    public static func writePTYInput(_ data: Data, to descriptor: Int32) {
         data.withUnsafeBytes { raw in
             guard let base = raw.baseAddress else { return }
             var offset = 0
+            var eagainRetries = 0
             while offset < raw.count {
                 let written = write(descriptor, base.advanced(by: offset), min(4096, raw.count - offset))
-                if written > 0 { offset += written }
-                else if written < 0 && errno == EINTR { continue }
-                else { return }
+                if written > 0 {
+                    offset += written
+                    eagainRetries = 0
+                } else if written < 0 && errno == EINTR {
+                    continue
+                } else if written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) && eagainRetries < 500 {
+                    eagainRetries += 1
+                    usleep(1_000)
+                } else {
+                    return
+                }
             }
         }
     }

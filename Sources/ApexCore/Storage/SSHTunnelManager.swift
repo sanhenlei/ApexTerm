@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import os
 
 @_silgen_name("proc_listchildpids")
 private func tunnel_proc_listchildpids(_ ppid: pid_t, _ buffer: UnsafeMutableRawPointer?, _ buffersize: Int32) -> Int32
@@ -72,11 +73,30 @@ public final class SSHTunnelManager: ObservableObject {
         }
     }
     
+    nonisolated public static func hasPortConflict(_ candidate: SSHTunnel, existing: SSHTunnel) -> Bool {
+        guard candidate.id != existing.id,
+              candidate.bindPort == existing.bindPort,
+              candidate.bindHost == existing.bindHost else {
+            return false
+        }
+        // Remote (-R) tunnels bind on the remote SSH server (scoped by sessionId),
+        // whereas Local (-L) and Dynamic (-D) tunnels bind on the local client machine.
+        let candidateIsRemote = candidate.type == .remote
+        let existingIsRemote = existing.type == .remote
+        guard candidateIsRemote == existingIsRemote else {
+            return false
+        }
+        if candidateIsRemote {
+            return candidate.sessionId == existing.sessionId
+        }
+        return true
+    }
+
     public func addTunnel(_ tunnel: SSHTunnel) throws {
         guard tunnel.isValid else {
             throw SSHTunnelError.invalidConfiguration("端口必须在 1 ~ 65535 范围内且地址不能为空")
         }
-        if tunnels.contains(where: { $0.id != tunnel.id && $0.bindPort == tunnel.bindPort && $0.bindHost == tunnel.bindHost }) {
+        if tunnels.contains(where: { Self.hasPortConflict(tunnel, existing: $0) }) {
             throw SSHTunnelError.portConflict(tunnel.bindPort)
         }
         tunnels.append(tunnel)
@@ -87,7 +107,7 @@ public final class SSHTunnelManager: ObservableObject {
         guard tunnel.isValid else {
             throw SSHTunnelError.invalidConfiguration("端口必须在 1 ~ 65535 范围内且地址不能为空")
         }
-        if tunnels.contains(where: { $0.id != tunnel.id && $0.bindPort == tunnel.bindPort && $0.bindHost == tunnel.bindHost }) {
+        if tunnels.contains(where: { Self.hasPortConflict(tunnel, existing: $0) }) {
             throw SSHTunnelError.portConflict(tunnel.bindPort)
         }
         if let index = tunnels.firstIndex(where: { $0.id == tunnel.id }) {
@@ -119,12 +139,26 @@ public final class SSHTunnelManager: ObservableObject {
     }
     
     // MARK: - Command Line Argument Generation
+
+    nonisolated public static func expandPath(_ path: String) -> String {
+        if KeychainStore.isVaultPrivateKeyReference(path) {
+            return SSHKeyVaultManager.materializePrivateKeyPath(for: path) ?? path
+        }
+        if path.hasPrefix("~/") {
+            let home = FileManager.default.homeDirectoryForCurrentUser.path
+            return home + "/" + String(path.dropFirst(2))
+        } else if path == "~" {
+            return FileManager.default.homeDirectoryForCurrentUser.path
+        }
+        return path
+    }
     
     /// Constructs the standard OpenSSH command line arguments for the tunnel
     nonisolated public static func buildSSHArguments(
         tunnel: SSHTunnel,
         session: Session,
-        privateKeyPath: String? = nil
+        privateKeyPath: String? = nil,
+        jumpSession: Session? = nil
     ) -> [String] {
         let interval = session.keepAliveIntervalSeconds > 0 ? min(max(session.keepAliveIntervalSeconds, 5), 60) : 15
         var args = [
@@ -138,32 +172,40 @@ public final class SSHTunnelManager: ObservableObject {
         ]
         
         // Tunnel specifier: -L, -R, or -D
+        let bHost = SSHTunnel.formatForwardingHost(tunnel.bindHost)
+        let tHost = SSHTunnel.formatForwardingHost(tunnel.targetHost)
         switch tunnel.type {
         case .local:
-            args.append(contentsOf: ["-L", "\(tunnel.bindHost):\(tunnel.bindPort):\(tunnel.targetHost):\(tunnel.targetPort)"])
+            args.append(contentsOf: ["-L", "\(bHost):\(tunnel.bindPort):\(tHost):\(tunnel.targetPort)"])
         case .remote:
-            args.append(contentsOf: ["-R", "\(tunnel.bindHost):\(tunnel.bindPort):\(tunnel.targetHost):\(tunnel.targetPort)"])
+            args.append(contentsOf: ["-R", "\(bHost):\(tunnel.bindPort):\(tHost):\(tunnel.targetPort)"])
         case .dynamic:
-            args.append(contentsOf: ["-D", "\(tunnel.bindHost):\(tunnel.bindPort)"])
+            args.append(contentsOf: ["-D", "\(bHost):\(tunnel.bindPort)"])
         }
         
         // Certificate and/or private key
         if let certPath = session.certificatePath, !certPath.isEmpty {
-            args.append(contentsOf: ["-o", "CertificateFile=\(certPath)"])
+            args.append(contentsOf: ["-o", "CertificateFile=\(expandPath(certPath))"])
         }
         if let keyPath = privateKeyPath ?? session.privateKeyPath, !keyPath.isEmpty {
-            args.append(contentsOf: ["-i", keyPath])
+            args.append(contentsOf: ["-i", expandPath(keyPath)])
+        }
+        if let jump = jumpSession, !jump.host.isEmpty {
+            let jHost = SSHTunnel.formatForwardingHost(jump.host)
+            args.append(contentsOf: ["-J", "\(jump.username)@\(jHost):\(jump.port)"])
         }
         
         // Port & host
-        args.append(contentsOf: ["-p", "\(session.port)", "\(session.username)@\(session.host)"])
+        let destHost = SSHTunnel.formatForwardingHost(session.host)
+        args.append(contentsOf: ["-p", "\(session.port)", "\(session.username)@\(destHost)"])
         return args
     }
     
     // MARK: - Credential Resolution
 
     /// Resolves the login password or key passphrase used to unlock a tunnel's SSH process.
-    /// Mirrors the terminal connection: legacy inline passwords fall back to the stored reference.
+    /// Mirrors the terminal connection: legacy inline passwords fall back to the stored reference,
+    /// and SSH Key Vault keys (`vault.priv.<UUID>`) fall back to their paired `vault.pass.<UUID>` passphrase.
     nonisolated public static func resolveSecret(
         for session: Session,
         lookup: @Sendable (String) async -> String? = { try? await KeychainStore.shared.get(key: $0) }
@@ -173,10 +215,15 @@ public final class SSHTunnelManager: ObservableObject {
             guard !ref.isEmpty else { return nil }
             if let found = await lookup(ref) { return found }
             return KeychainStore.isManagedReference(ref) ? nil : ref
-        case .privateKey(_, let passphraseRef), .certificate(_, _, let passphraseRef):
-            guard let ref = passphraseRef, !ref.isEmpty else { return nil }
-            if let found = await lookup(ref) { return found }
-            return KeychainStore.isManagedReference(ref) ? nil : ref
+        case .privateKey(let keyRef, let passphraseRef), .certificate(let keyRef, _, let passphraseRef):
+            if let ref = passphraseRef, !ref.isEmpty {
+                if let found = await lookup(ref) { return found }
+                return KeychainStore.isManagedReference(ref) ? nil : ref
+            }
+            if let vaultPassRef = KeychainStore.vaultPassphraseReference(forPrivateKeyRef: keyRef) {
+                return await lookup(vaultPassRef)
+            }
+            return nil
         default:
             return nil
         }
@@ -197,7 +244,8 @@ public final class SSHTunnelManager: ObservableObject {
         session: Session,
         password: String? = nil,
         privateKeyPath: String? = nil,
-        sshpassPath: String? = nil
+        sshpassPath: String? = nil,
+        jumpSession: Session? = nil
     ) throws {
         guard let tunnel = tunnels.first(where: { $0.id == id }) else {
             throw SSHTunnelError.tunnelNotFound
@@ -213,8 +261,11 @@ public final class SSHTunnelManager: ObservableObject {
         stopTunnel(id: id)
         activeStates[id] = .starting
         
+        let resolvedJump = jumpSession ?? session.jumpServerId.flatMap { jid in
+            SessionStore.shared.sessions.first(where: { $0.id == jid })
+        }
         var binaryPath = "/usr/bin/ssh"
-        var sshArgs = Self.buildSSHArguments(tunnel: tunnel, session: session, privateKeyPath: privateKeyPath)
+        var sshArgs = Self.buildSSHArguments(tunnel: tunnel, session: session, privateKeyPath: privateKeyPath, jumpSession: resolvedJump)
         
         if let pw = password, !pw.isEmpty, let sshpass = sshpassPath, FileManager.default.isExecutableFile(atPath: sshpass) {
             binaryPath = sshpass
@@ -227,13 +278,36 @@ public final class SSHTunnelManager: ObservableObject {
         
         let pipe = Pipe()
         process.standardError = pipe
-        process.standardOutput = Pipe()
+        process.standardOutput = FileHandle.nullDevice
+        
+        let stderrBuffer = OSAllocatedUnfairLock(initialState: Data())
+        pipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            guard !chunk.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
+            stderrBuffer.withLock { buf in
+                buf.append(chunk)
+                if buf.count > 8192 {
+                    buf = Data(buf.suffix(8192))
+                }
+            }
+        }
         
         stderrPipes[id] = pipe
         processes[id] = process
         
         process.terminationHandler = { [weak self] proc in
-            let stderrData = pipe.fileHandleForReading.availableData
+            pipe.fileHandleForReading.readabilityHandler = nil
+            let remaining = (try? pipe.fileHandleForReading.readToEnd()) ?? Data()
+            let stderrData = stderrBuffer.withLock { buf -> Data in
+                if !remaining.isEmpty {
+                    buf.append(remaining)
+                    if buf.count > 8192 { buf = Data(buf.suffix(8192)) }
+                }
+                return buf
+            }
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
                 self.processes.removeValue(forKey: id)
@@ -254,6 +328,7 @@ public final class SSHTunnelManager: ObservableObject {
             // Mark active once launched
             self.activeStates[id] = .active
         } catch {
+            pipe.fileHandleForReading.readabilityHandler = nil
             self.processes.removeValue(forKey: id)
             self.stderrPipes.removeValue(forKey: id)
             self.activeStates[id] = .failed(error.localizedDescription)
@@ -262,15 +337,20 @@ public final class SSHTunnelManager: ObservableObject {
     }
     
     public func stopTunnel(id: UUID) {
+        if let pipe = stderrPipes.removeValue(forKey: id) {
+            pipe.fileHandleForReading.readabilityHandler = nil
+        }
         if let proc = processes.removeValue(forKey: id) {
             proc.terminationHandler = nil
             Self.terminateTunnelProcessTree(proc)
         }
-        stderrPipes.removeValue(forKey: id)
         activeStates[id] = .stopped
     }
     
     public func stopAll() {
+        for (_, pipe) in stderrPipes {
+            pipe.fileHandleForReading.readabilityHandler = nil
+        }
         for (id, proc) in processes {
             proc.terminationHandler = nil
             Self.terminateTunnelProcessTree(proc)

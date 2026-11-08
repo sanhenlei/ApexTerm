@@ -50,6 +50,7 @@ public final class TerminalRingBuffer: @unchecked Sendable {
     }
     private var pendingSequence: String = ""
     private let vtParser = VTParser()
+    public let shellIntegration = ShellIntegrationTracker()
     private var screen: [[TerminalCell]]? = nil
     private var screenRows = 35
     private var screenColumns = 120
@@ -152,6 +153,7 @@ public final class TerminalRingBuffer: @unchecked Sendable {
     
     private var _totalCommittedCount: Int64 = 0
     private var _isClearPending: Bool = false
+    private var _isBellPending: Bool = false
     private var _isBracketedPasteEnabled: Bool = false
     
     /// Whether the remote shell has enabled bracketed paste mode (DEC private mode 2004)
@@ -167,6 +169,17 @@ public final class TerminalRingBuffer: @unchecked Sendable {
         defer { lock.unlock() }
         if _isClearPending {
             _isClearPending = false
+            return true
+        }
+        return false
+    }
+
+    /// Atomically consume and reset pending terminal bell (\u{07}) flag
+    public func consumeBellFlag() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if _isBellPending {
+            _isBellPending = false
             return true
         }
         return false
@@ -331,6 +344,7 @@ public final class TerminalRingBuffer: @unchecked Sendable {
                 i = fullText.index(after: i)
                 continue
             } else if ch == "\u{07}" { // Bell
+                _isBellPending = true
                 i = fullText.index(after: i)
                 continue
             } else if ch == "\u{001B}" { // ESC sequence
@@ -395,20 +409,32 @@ public final class TerminalRingBuffer: @unchecked Sendable {
                     i = fullText.index(after: next)
                     continue
                 } else if nextChar == "]" { // OSC Sequence
-                    var j = fullText.index(after: next)
+                    let payloadStart = fullText.index(after: next)
+                    var j = payloadStart
                     while j < fullText.endIndex && fullText[j] != "\u{0007}" && fullText[j] != "\u{001B}" {
                         j = fullText.index(after: j)
                     }
+                    let payloadEnd = j
                     if j < fullText.endIndex && fullText[j] == "\u{001B}" {
                         let afterEsc = fullText.index(after: j)
                         if afterEsc < fullText.endIndex && fullText[afterEsc] == "\\" {
                             j = afterEsc
+                        } else if afterEsc == fullText.endIndex {
+                            pendingSequence = String(fullText[escapeStart...])
+                            break
                         }
                     }
                     if j == fullText.endIndex {
                         pendingSequence = String(fullText[escapeStart...])
                         break
                     }
+                    let oscPayload = String(fullText[payloadStart..<payloadEnd])
+                    let currentActive = isEditingActiveLine ? renderCellsToString(activeCells) : activeLine
+                    shellIntegration.handleOSCPayload(
+                        oscPayload,
+                        currentLineIndex: Int(_totalCommittedCount),
+                        activeLineText: currentActive
+                    )
                     i = fullText.index(after: j)
                     continue
                 } else if "()*+-./".contains(nextChar) {
@@ -666,7 +692,7 @@ public final class TerminalRingBuffer: @unchecked Sendable {
         switch finalChar {
         case "m":
             var style = currentStyle
-            style.apply(param.split(separator: ";").compactMap { Int($0) })
+            style.apply(param: param)
             currentStyle = style
         case "H", "f":
             screenRow = min(screenRows - 1, max(0, amount - 1))
@@ -812,9 +838,8 @@ public final class TerminalRingBuffer: @unchecked Sendable {
                 _isBracketedPasteEnabled = false
             }
         case "m": // SGR Color & Style
-            let codes = param.split(separator: ";").compactMap { Int($0) }
             var style = currentStyle
-            style.apply(codes)
+            style.apply(param: param)
             currentStyle = style
         case "J": // Erase in Display
             let mode = Int(param) ?? 0
@@ -1019,9 +1044,17 @@ public final class TerminalRingBuffer: @unchecked Sendable {
         return count + (hasActive ? 1 : 0)
     }
     
+    /// Returns the number of backing array slots currently holding non-empty strings (for memory reclamation verification).
+    public var nonEmptyBackingSlotCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return buffer.reduce(0) { $0 + ($1.isEmpty ? 0 : 1) }
+    }
+
     private func resetTerminalState() {
         head = 0; count = 0; _totalCommittedCount = 0
-        activeLine = ""; activeCells.removeAll(keepingCapacity: true)
+        buffer = [String](repeating: "", count: historyLimit)
+        activeLine = ""; activeCells.removeAll(keepingCapacity: false)
         isEditingActiveLine = false; cursorCol = 0
         currentStyle = SGRStyle(foreground: nil, index: nil, bold: false)
         pendingSequence = ""; screen = nil
@@ -1030,25 +1063,63 @@ public final class TerminalRingBuffer: @unchecked Sendable {
         savedScreenPosition = nil
         _isCursorHidden = false; _isApplicationCursorKeys = false
         _isBracketedPasteEnabled = false; _mouseTrackingMode = 0; _isSGRMouseEnabled = false
+        _isBellPending = false
+        shellIntegration.reset()
         _screenRevision += 1; _isClearPending = true
     }
 
-    /// Clear all lines
+    /// Clear all lines and immediately release backing scrollback string memory
     public func clear() {
         lock.lock()
         head = 0
         count = 0
         _totalCommittedCount = 0
+        buffer = [String](repeating: "", count: historyLimit)
         activeLine = ""
-        activeCells.removeAll(keepingCapacity: true)
+        activeCells.removeAll(keepingCapacity: false)
         isEditingActiveLine = false
         cursorCol = 0
         pendingSequence = ""
         currentStyle = SGRStyle(foreground: nil, index: nil, bold: false)
+        _isBellPending = false
         _isClearPending = true
+        shellIntegration.reset()
         let updateHandler = onUpdate
         lock.unlock()
         
         updateHandler?()
+    }
+
+    /// Extracts plain-text output for a specific OSC 133 `CommandExecutionRecord` from the current buffer window.
+    public func extractOSC133CommandOutput(for record: CommandExecutionRecord) -> String? {
+        lock.lock()
+        let totalCommitted = Int(_totalCommittedCount)
+        let retainedCount = count
+        let oldestLifetimeIndex = max(0, totalCommitted - retainedCount)
+        let startIdx = max(0, record.outputStartLine - oldestLifetimeIndex)
+        let rawEndLifetime = record.outputEndLine ?? totalCommitted
+        let endIdx = min(retainedCount, max(startIdx, rawEndLifetime - oldestLifetimeIndex))
+        guard startIdx < endIdx else {
+            lock.unlock()
+            return nil
+        }
+        var rawLines: [String] = []
+        rawLines.reserveCapacity(endIdx - startIdx)
+        for offset in startIdx..<endIdx {
+            let bufIndex = (head + offset) % historyLimit
+            rawLines.append(buffer[bufIndex])
+        }
+        lock.unlock()
+
+        let cleaned = rawLines.map { line in
+            vtParser.parseANSI(line).map(\.text).joined()
+        }.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? nil : cleaned
+    }
+
+    /// Extracts plain-text output for the most recent completed OSC 133 command execution record.
+    public func extractLastOSC133CommandOutput() -> String? {
+        guard let last = shellIntegration.lastCompletedRecord else { return nil }
+        return extractOSC133CommandOutput(for: last)
     }
 }

@@ -111,6 +111,7 @@ public final class iCloudSyncManager: ObservableObject {
             default:
                 break
             }
+            s.environmentVariables = SessionStartupHelper.sanitizeEnvironmentForCloud(s.environmentVariables)
             safeSessions.append(s)
         }
         sanitized.sessions = safeSessions
@@ -119,6 +120,15 @@ public final class iCloudSyncManager: ObservableObject {
     
     // MARK: - Primary Synchronization
     
+    /// Executes a synchronization cycle with a temporary conflict resolution strategy, guaranteed to restore on return or throw.
+    @discardableResult
+    public func syncNow(withTemporaryStrategy strategy: iCloudConflictStrategy) async throws -> iCloudSyncResult {
+        let previous = conflictStrategy
+        conflictStrategy = strategy
+        defer { conflictStrategy = previous }
+        return try await syncNow()
+    }
+
     /// Executes a full synchronization cycle according to the configured conflict resolution strategy
     @discardableResult
     public func syncNow() async throws -> iCloudSyncResult {

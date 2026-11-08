@@ -109,6 +109,11 @@ public struct TerminalRepresentable: NSViewRepresentable {
         }
     }
     
+    public static func dismantleNSView(_ nsView: NativeTerminalScrollView, coordinator: Coordinator) {
+        coordinator.scrollView = nil
+        nsView.tearDown()
+    }
+    
     public func makeCoordinator() -> Coordinator {
         Coordinator()
     }
@@ -462,6 +467,17 @@ public final class NativeTerminalScrollView: NSScrollView {
         searchBarOverlay.hide()
     }
     
+    /// Explicitly releases observers, timers, and backing text storage when the scroll view is dismantled.
+    public func tearDown() {
+        NotificationCenter.default.removeObserver(self)
+        searchBarOverlay.terminalView = nil
+        terminalView.tearDown()
+    }
+    
+    isolated deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+    
     @objc private func handleTriggerFindNotification(_ note: Notification) {
         if let win = window, win.isKeyWindow, win.firstResponder === terminalView {
             showFindBar()
@@ -550,6 +566,8 @@ public final class NativeTerminalView: NSTextView {
     }
     public var onInput: ((Data) -> Void)?
     public var isCopyOnSelectEnabled: Bool = true
+    public private(set) var bellTriggerCount: Int = 0
+    private var visualBellLayer: CALayer?
     public var onResize: ((Int, Int) -> Void)?
     public var onFileDrop: ((URL) -> Void)?
     public var onFocus: (() -> Void)? = nil
@@ -609,8 +627,21 @@ public final class NativeTerminalView: NSTextView {
     private var cachedBaseFont: NSFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
     private var cachedBoldFont: NSFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .bold)
     private var glyphAdvanceCache: [String: CGFloat] = [:]
+    public static let maxColorCacheEntries: Int = 1024
     private static var colorCache: [String: NSColor] = [:]
     private static let colorCacheLock = NSLock()
+    
+    public static var cachedColorCount: Int {
+        colorCacheLock.lock()
+        defer { colorCacheLock.unlock() }
+        return colorCache.count
+    }
+    
+    public static func clearColorCache() {
+        colorCacheLock.lock()
+        colorCache.removeAll(keepingCapacity: false)
+        colorCacheLock.unlock()
+    }
     
     /// Tracks whether viewport is pinned to the command prompt line at the bottom
     public var isPinnedToBottom: Bool = true
@@ -988,8 +1019,34 @@ public final class NativeTerminalView: NSTextView {
         needsDisplay = true
     }
     
+    /// Explicitly tears down timers, notification observers, callbacks, and cached attributed rows.
+    public func tearDown() {
+        stopCursorBlink()
+        resizeDebounceTask?.cancel()
+        resizeDebounceTask = nil
+        pendingDimensions = nil
+        NotificationCenter.default.removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        if let settingsObserver {
+            NotificationCenter.default.removeObserver(settingsObserver)
+            self.settingsObserver = nil
+        }
+        ringBuffer?.onUpdate = nil
+        ringBuffer = nil
+        onInput = nil
+        onResize = nil
+        onFileDrop = nil
+        onFocus = nil
+        renderedScreenRows = nil
+        renderedScreenLines = nil
+        renderedCommittedLineLengths.removeAll(keepingCapacity: false)
+        glyphAdvanceCache.removeAll(keepingCapacity: false)
+        textStorage?.setAttributedString(NSAttributedString())
+    }
+    
     isolated deinit {
         cursorBlinkTimer?.invalidate()
+        resizeDebounceTask?.cancel()
         NotificationCenter.default.removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         if let settingsObserver { NotificationCenter.default.removeObserver(settingsObserver) }
@@ -1303,8 +1360,10 @@ public final class NativeTerminalView: NSTextView {
         }
     }
     
+    private nonisolated static let linkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+
     public nonisolated static func detectURLs(in text: String) -> [DetectedURLMatch] {
-        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return [] }
+        guard let detector = Self.linkDetector else { return [] }
         let nsText = text as NSString
         let rawMatches = detector.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
         
@@ -1823,8 +1882,10 @@ public final class NativeTerminalView: NSTextView {
     }
     
     override public func menu(for event: NSEvent) -> NSMenu? {
-        // If there is an active selection, ensure it is copied
-        copySelectionToPasteboardIfAny()
+        // If there is an active selection and copy-on-select is enabled, ensure it is copied
+        if isCopyOnSelectEnabled {
+            copySelectionToPasteboardIfAny()
+        }
         
         let menu = NSMenu(title: "Terminal")
         let hasSelection = self.selectedRange().length > 0
@@ -2100,6 +2161,9 @@ public final class NativeTerminalView: NSTextView {
                     Self.colorCacheLock.unlock()
                     if let parsed = NSColor(hex: hex) {
                         Self.colorCacheLock.lock()
+                        if Self.colorCache.count >= Self.maxColorCacheEntries {
+                            Self.colorCache.removeAll(keepingCapacity: true)
+                        }
                         Self.colorCache[hex] = parsed
                         Self.colorCacheLock.unlock()
                         textColor = parsed
@@ -2171,9 +2235,51 @@ public final class NativeTerminalView: NSTextView {
         }
     }
     
+    public func handleBellIfNeeded() {
+        guard ringBuffer?.consumeBellFlag() == true else { return }
+        bellTriggerCount += 1
+        switch AppSettings.shared.bellMode {
+        case .audible:
+            NSSound.beep()
+        case .visual:
+            triggerVisualBellFlash()
+        case .none:
+            break
+        }
+    }
+
+    private func triggerVisualBellFlash() {
+        guard let hostLayer = self.layer else {
+            self.needsDisplay = true
+            return
+        }
+        let flashLayer = visualBellLayer ?? {
+            let layer = CALayer()
+            layer.zPosition = 999
+            visualBellLayer = layer
+            return layer
+        }()
+        flashLayer.frame = bounds
+        let fg = NSColor(hex: AppSettings.shared.themePreset.palette.foreground) ?? .white
+        flashLayer.backgroundColor = fg.withAlphaComponent(0.16).cgColor
+        if flashLayer.superlayer == nil {
+            hostLayer.addSublayer(flashLayer)
+        }
+        flashLayer.removeAllAnimations()
+        flashLayer.opacity = 1.0
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(0.18)
+        CATransaction.setCompletionBlock { [weak flashLayer] in
+            flashLayer?.removeFromSuperlayer()
+        }
+        flashLayer.opacity = 0.0
+        CATransaction.commit()
+    }
+
     /// Incremental refresh: updates active line in-place and appends newly committed lines
     public func refresh() {
         guard let buffer = ringBuffer else { return }
+        handleBellIfNeeded()
 
         if let screenLines = buffer.screenLines {
             let lineHeight = layoutManager?.defaultLineHeight(for: cachedBaseFont) ?? 16

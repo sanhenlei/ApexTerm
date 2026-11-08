@@ -38,6 +38,7 @@ public final class TerminalPaneItem: Identifiable, ObservableObject {
     }
     public var onConnectionStateChanged: ((SSHConnectionState) -> Void)?
     public private(set) var logger: SessionLogger?
+    public private(set) var isTornDown: Bool = false
     
     public func cancelAutoReconnect() {
         autoReconnectTask?.cancel()
@@ -46,7 +47,29 @@ public final class TerminalPaneItem: Identifiable, ObservableObject {
         autoReconnectAttempt = 0
     }
     
+    /// Explicitly tears down the pane, cancelling pending auto-reconnect timers, closing audit logs,
+    /// clearing scrollback memory, detaching SSH callbacks, and disconnecting the underlying session.
+    public func tearDown() {
+        guard !isTornDown else { return }
+        isTornDown = true
+        cancelAutoReconnect()
+        onAutoReconnectRequested = nil
+        onConnectionStateChanged = nil
+        sshClient.setOutputHandler { _ in }
+        sshClient.setStateChangeHandler { _ in }
+        sshClient.setDirectoryChangeHandler { _ in }
+        sshClient.setMetricsHandler { _ in }
+        ringBuffer.onUpdate = nil
+        ringBuffer.finishStream()
+        ringBuffer.clear()
+        logger?.close()
+        logger = nil
+        let client = sshClient
+        Task { await client.disconnect() }
+    }
+    
     private func scheduleAutoReconnect() {
+        guard !isTornDown else { return }
         autoReconnectTask?.cancel()
         autoReconnectAttempt += 1
         isAutoReconnecting = true
@@ -55,7 +78,7 @@ public final class TerminalPaneItem: Identifiable, ObservableObject {
         let delayNs = delays[min(max(attempt - 1, 0), delays.count - 1)]
         autoReconnectTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: delayNs)
-            guard let self = self, !Task.isCancelled, self.isAutoReconnecting else { return }
+            guard let self = self, !Task.isCancelled, !self.isTornDown, self.isAutoReconnecting else { return }
             self.onAutoReconnectRequested?(self)
         }
     }
@@ -93,7 +116,7 @@ public final class TerminalPaneItem: Identifiable, ObservableObject {
                 sessionLogger?.close()
             }
             Task { @MainActor [weak self] in
-                guard let self = self else { return }
+                guard let self = self, !self.isTornDown else { return }
                 self.connectionState = state
                 if case .disconnected = state,
                    self.hasEverConnected,
@@ -174,8 +197,24 @@ public final class TerminalTabItem: Identifiable, ObservableObject {
     }
     @Published public var splitMode: PaneSplitMode = .single
     @Published public var isPaneMaximized: Bool = false
+    public private(set) var isTornDown: Bool = false
     
     private let fallbackRingBuffer = TerminalRingBuffer(maxLines: AppSettings.shared.scrollbackMaxLines)
+    
+    /// Explicitly tears down the tab and all its split panes, cancelling background tasks and reclaiming memory.
+    public func tearDown() {
+        guard !isTornDown else { return }
+        isTornDown = true
+        terminfoProbeTask?.cancel()
+        terminfoProbeTask = nil
+        linkageRefreshTask?.cancel()
+        linkageRefreshTask = nil
+        metricsHistory.clear()
+        fallbackRingBuffer.clear()
+        for pane in panes {
+            pane.tearDown()
+        }
+    }
     public var ringBuffer: TerminalRingBuffer {
         activePane?.ringBuffer ?? panes.first?.ringBuffer ?? fallbackRingBuffer
     }
@@ -188,8 +227,14 @@ public final class TerminalTabItem: Identifiable, ObservableObject {
         self.session = session
         self.sshClient = sshClient
         self.isMonitoringEnabled = session.agentlessMonitorEnabled
+        let defaultRemoteDir: String = {
+            if let initDir = session.initialWorkingDirectory?.trimmingCharacters(in: .whitespacesAndNewlines), !initDir.isEmpty {
+                return initDir
+            }
+            return "~"
+        }()
         self.currentRemotePath = UserDefaults.standard.string(forKey: "workspace.remotePath.\(session.id.uuidString)")
-            ?? "~"
+            ?? defaultRemoteDir
         self.isDirectoryLinkageEnabled = session.sftpAutoSyncEnabled
         self.connectionState = .connecting(step: "正在连接")
         
@@ -289,6 +334,7 @@ public final class TerminalTabItem: Identifiable, ObservableObject {
         }
         Task {
             do {
+                let shouldRunStartupBootstrap = !p.hasEverConnected
                 try await p.sshClient.connect()
                 let dims = p.ringBuffer.dimensions
                 try? await p.sshClient.resizeTerminal(columns: dims.columns, rows: dims.rows)
@@ -298,6 +344,15 @@ public final class TerminalTabItem: Identifiable, ObservableObject {
                 }
                 if isPrimaryPane {
                     self.probeTerminfo(client: p.sshClient)
+                }
+                if shouldRunStartupBootstrap,
+                   let bootstrap = SessionStartupHelper.buildBootstrapCommand(
+                       for: self.session,
+                       includeWorkingDirectory: !self.session.isLocal,
+                       includeEnvExports: !self.session.isLocal
+                   ),
+                   let data = (bootstrap + "\n").data(using: .utf8) {
+                    try? await p.sshClient.sendInput(data)
                 }
                 
                 // Auto-start configured tunnels for this session
@@ -385,7 +440,7 @@ public final class TerminalTabItem: Identifiable, ObservableObject {
     public func closePane(id: UUID) {
         guard let idx = panes.firstIndex(where: { $0.id == id }) else { return }
         let pane = panes[idx]
-        Task { await pane.sshClient.disconnect() }
+        pane.tearDown()
         panes.remove(at: idx)
         splitMode = .single
         paneSplitRatio = 0.5
@@ -456,6 +511,10 @@ public struct WorkspaceView: View {
     /// down the popover's anchor and re-present it as a non-key window that ignores Escape.
     @State private var metricsDetail = MetricsDetailPresentation()
     @State private var hudToastMessage: String?
+    @State private var pendingSnippetForVariables: Snippet? = nil
+    @State private var pendingSnippetVariables: [String: String] = [:]
+    
+    public static let executeSnippetNotification = NSNotification.Name("ExecuteSnippetInWorkspace")
     
     // Tab Rename
     @State private var tabToRename: TerminalTabItem?
@@ -585,8 +644,11 @@ public struct WorkspaceView: View {
                         onBroadcastSubmit: { cmd in
                             guard let data = cmd.data(using: .utf8) else { return }
                             for tab in activeTabs {
-                                for pane in tab.panes {
-                                    Task { try? await pane.sshClient.sendInput(data) }
+                                for p in tab.panes where p.connectionState == .connected {
+                                    Task { try? await p.sshClient.sendInput(data) }
+                                }
+                                if tab.isDirectoryLinkageEnabled && (data.contains(13) || data.contains(10)) {
+                                    tab.scheduleDirectoryLinkageRefresh()
                                 }
                             }
                         }
@@ -827,6 +889,25 @@ public struct WorkspaceView: View {
                 showHUDToast(msg)
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: Self.executeSnippetNotification)) { notif in
+            if let snippet = notif.object as? Snippet {
+                executeSnippet(snippet)
+            }
+        }
+        .sheet(item: $pendingSnippetForVariables) { snippet in
+            VariableInputSheet(
+                snippet: snippet,
+                variableValues: $pendingSnippetVariables,
+                onConfirm: { resolved in
+                    sendSnippetCommand(resolved, autoExecute: true)
+                    pendingSnippetForVariables = nil
+                },
+                onCancel: {
+                    pendingSnippetForVariables = nil
+                }
+            )
+            .apexTheme()
+        }
         .sheet(isPresented: $isTunnelModalPresented) {
             SSHTunnelModalView(store: store).apexTheme()
         }
@@ -942,6 +1023,12 @@ public struct WorkspaceView: View {
 
     private func copyLastCommandOutput() {
         guard let tab = currentTab, let active = tab.activePane else { return }
+        if let oscOutput = active.ringBuffer.extractLastOSC133CommandOutput() {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(oscOutput, forType: .string)
+            showHUDToast("已复制上一条命令输出 (\(oscOutput.count) 字符)")
+            return
+        }
         let lines = active.ringBuffer.allLines()
         if let output = CommandBoundaryDetector.extractLastCommandOutput(from: lines) {
             NSPasteboard.general.clearContents()
@@ -981,16 +1068,7 @@ public struct WorkspaceView: View {
                 isSFTPVisible = true
             }
         case .runSnippet(let snippet):
-            if let tab = currentTab, let pane = tab.activePane ?? tab.panes.first {
-                let resolved = snippet.resolvedCommand(context: [
-                    "host": tab.session.host,
-                    "user": tab.session.username,
-                    "port": "\(tab.session.port)"
-                ])
-                if let data = (resolved + "\n").data(using: .utf8) {
-                    Task { try? await pane.sshClient.sendInput(data) }
-                }
-            }
+            executeSnippet(snippet)
         case .executeAppAction(let appAction):
             switch appAction {
             case .newLocalTerminal:
@@ -1020,6 +1098,34 @@ public struct WorkspaceView: View {
             case .openShortcuts:
                 NotificationCenter.default.post(name: NSNotification.Name("OpenShortcutsModal"), object: nil)
             }
+        }
+    }
+
+    public func executeSnippet(_ snippet: Snippet) {
+        guard let tab = currentTab else { return }
+        let baseContext: [String: String] = [
+            "host": tab.session.host,
+            "user": tab.session.username
+        ]
+        let unresolved = snippet.unresolvedVariables(context: baseContext)
+        if unresolved.isEmpty {
+            let resolved = snippet.resolvedCommand(context: baseContext)
+            sendSnippetCommand(resolved, autoExecute: true)
+        } else {
+            var initialValues = baseContext
+            for v in unresolved {
+                initialValues[v] = ""
+            }
+            pendingSnippetVariables = initialValues
+            pendingSnippetForVariables = snippet
+        }
+    }
+
+    private func sendSnippetCommand(_ command: String, autoExecute: Bool) {
+        guard let tab = currentTab, let pane = tab.activePane ?? tab.panes.first else { return }
+        let payload = autoExecute ? (command + "\n") : command
+        if let data = payload.data(using: .utf8) {
+            Task { try? await pane.sshClient.sendInput(data) }
         }
     }
 
@@ -1071,9 +1177,7 @@ public struct WorkspaceView: View {
     }
 
     private func closeTab(_ tab: TerminalTabItem) {
-        for pane in tab.panes {
-            Task { await pane.sshClient.disconnect() }
-        }
+        tab.tearDown()
         activeTabs.removeAll(where: { $0.id == tab.id })
         if selectedTabId == tab.id {
             selectedTabId = activeTabs.first?.id
@@ -1083,9 +1187,7 @@ public struct WorkspaceView: View {
     private func closeOtherTabs(_ tab: TerminalTabItem) {
         let toClose = activeTabs.filter { $0.id != tab.id }
         for t in toClose {
-            for pane in t.panes {
-                Task { await pane.sshClient.disconnect() }
-            }
+            t.tearDown()
         }
         activeTabs = [tab]
         selectedTabId = tab.id
@@ -1095,9 +1197,7 @@ public struct WorkspaceView: View {
         guard let idx = activeTabs.firstIndex(where: { $0.id == tab.id }) else { return }
         let toClose = Array(activeTabs.suffix(from: idx + 1))
         for t in toClose {
-            for pane in t.panes {
-                Task { await pane.sshClient.disconnect() }
-            }
+            t.tearDown()
         }
         activeTabs.removeSubrange((idx + 1)...)
         if !activeTabs.contains(where: { $0.id == selectedTabId }) {
@@ -1545,6 +1645,7 @@ private struct PaneContainerView: View {
                             tab.activePaneId = pane.id
                         }
                     },
+                    isCopyOnSelectEnabled: themeSettings.isCopyOnSelectEnabled,
                     triggers: store.triggers,
                     onResize: { cols, rows in
                         Task {
@@ -1563,7 +1664,7 @@ private struct PaneContainerView: View {
                 ) { inputData in
                     if isBroadcastActive {
                         for t in activeTabs {
-                            for p in t.panes {
+                            for p in t.panes where p.connectionState == .connected {
                                 p.sshClient.sendInputSync(inputData)
                             }
                         }
@@ -1684,6 +1785,44 @@ private struct WorkspaceBottomStatusBar: View {
             
             Text("UTF-8")
                 .apexKeycap()
+            
+            if let pane = tab.activePane ?? tab.panes.first,
+               let lastRecord = pane.ringBuffer.shellIntegration.lastCompletedRecord {
+                Divider().frame(height: 12)
+                Menu {
+                    let records = Array(pane.ringBuffer.shellIntegration.allRecords().suffix(10).reversed())
+                    ForEach(records) { rec in
+                        let titleCmd = rec.commandText ?? "Shell 命令"
+                        let statusBadge = rec.isFailed ? "✗ Exit \(rec.exitCode ?? 1)" : "✓"
+                        Menu("\(statusBadge) \(titleCmd) (\(rec.formattedDuration))") {
+                            if let cmd = rec.commandText, !cmd.isEmpty {
+                                Button("复制命令文本") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(cmd, forType: .string)
+                                }
+                            }
+                            Button("复制此命令输出") {
+                                if let out = pane.ringBuffer.extractOSC133CommandOutput(for: rec) {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(out, forType: .string)
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: lastRecord.isFailed ? "xmark.circle.fill" : "checkmark.circle.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(lastRecord.isFailed ? ApexStyle.error : ApexStyle.success)
+                        Text(lastRecord.isFailed ? "Exit \(lastRecord.exitCode ?? 1) · \(lastRecord.formattedDuration)" : lastRecord.formattedDuration)
+                            .font(.caption.monospaced())
+                            .foregroundColor(lastRecord.isFailed ? ApexStyle.error : ApexStyle.secondary)
+                    }
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("OSC 133 Shell 集成：最近命令执行状态与耗时记录")
+            }
             
             if showsDirectoryControls {
                 Divider().frame(height: 12)

@@ -105,6 +105,10 @@ public struct SFTPView: View {
     @State private var isShowingNewFolderAlert = false
     @State private var newFileName = ""
     @State private var isShowingNewFileAlert = false
+    @State private var inspectingItem: SFTPItem? = nil
+    @State private var itemToSymlink: SFTPItem? = nil
+    @State private var symlinkNameText = ""
+    @State private var isShowingSymlinkAlert = false
 
     public init(
         currentPath: Binding<String>,
@@ -632,6 +636,22 @@ public struct SFTPView: View {
                 }
             )
         }
+        .sheet(item: $inspectingItem) { item in
+            SFTPFileInspectorSheet(item: item, session: session)
+                .apexTheme()
+        }
+        .alert("创建符号链接 (ln -s)", isPresented: $isShowingSymlinkAlert) {
+            TextField("链接名称", text: $symlinkNameText)
+                .autocorrectionDisabled()
+            Button("创建") {
+                if let item = itemToSymlink {
+                    performCreateSymlink(targetItem: item, linkName: symlinkNameText)
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("在当前目录创建指向「\(itemToSymlink?.name ?? "")」的符号链接")
+        }
         .confirmationDialog(
             "确定删除？",
             isPresented: isShowingDeleteConfirmation,
@@ -741,58 +761,89 @@ public struct SFTPView: View {
 
     @ViewBuilder
     private func fileContextActions(_ item: SFTPItem) -> some View {
-        Button(DistributionChannel.current == .appStore ? "下载并保存…" : L10n.downloadToDownloads) {
-            selectedPaths = [item.path]
-            downloadAction(item)
-        }
-        if !item.isDirectory {
-            Button(L10n.quickViewEdit) {
-                selectedPaths = [item.path]
-                openEditor(item)
+        if item.isParentNavigationEntry {
+            Button("返回上级目录") {
+                navigateUp()
             }
-        }
-        Divider()
-        Button("重命名...") {
-            selectedPaths = [item.path]
-            itemToRename = item
-            renameText = item.name
-            isShowingRenameAlert = true
-        }
-        Button("修改权限 (chmod)...") {
-            selectedPaths = [item.path]
-            itemToChmod = item
-            chmodText = item.isDirectory ? "755" : "644"
-            isShowingChmodAlert = true
-        }
-        Button(role: .destructive) {
-            selectedPaths = [item.path]
-            itemToDelete = item
-        } label: {
-            Label("删除", systemImage: "trash")
-        }
-        Divider()
-        Button(L10n.copyRemotePath) {
-            selectedPaths = [item.path]
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(item.path, forType: .string)
+            Divider()
+            Button(L10n.copyRemotePath) {
+                selectedPaths = [item.path]
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(item.path, forType: .string)
+            }
+        } else {
+            Button(DistributionChannel.current == .appStore ? "下载并保存…" : L10n.downloadToDownloads) {
+                selectedPaths = [item.path]
+                downloadAction(item)
+            }
+            if !item.isDirectory {
+                Button(L10n.quickViewEdit) {
+                    selectedPaths = [item.path]
+                    openEditor(item)
+                }
+            }
+            Button("属性与校验和 (SHA-256)...") {
+                selectedPaths = [item.path]
+                inspectingItem = item
+            }
+            if item.isModifiableRemoteItem {
+                Divider()
+                Button("重命名...") {
+                    selectedPaths = [item.path]
+                    itemToRename = item
+                    renameText = item.name
+                    isShowingRenameAlert = true
+                }
+                Button("修改权限 (chmod)...") {
+                    selectedPaths = [item.path]
+                    itemToChmod = item
+                    chmodText = item.isDirectory ? "755" : "644"
+                    isShowingChmodAlert = true
+                }
+                Button("在服务器端创建副本 (快速克隆)") {
+                    selectedPaths = [item.path]
+                    performServerSideDuplicate(item)
+                }
+                Button("创建符号链接 (ln -s)...") {
+                    selectedPaths = [item.path]
+                    itemToSymlink = item
+                    symlinkNameText = "\(item.name)-link"
+                    isShowingSymlinkAlert = true
+                }
+                Button(role: .destructive) {
+                    selectedPaths = [item.path]
+                    itemToDelete = item
+                } label: {
+                    Label("删除", systemImage: "trash")
+                }
+            }
+            Divider()
+            Button(L10n.copyRemotePath) {
+                selectedPaths = [item.path]
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(item.path, forType: .string)
+            }
         }
     }
 
     @ViewBuilder
     private func batchContextActions(for ids: Set<String>) -> some View {
-        let selectedItems = items.filter { ids.contains($0.path) }
-        Button("下载选中的 \(selectedItems.count) 个项目") {
-            downloadBatchAction(selectedItems)
+        let selectedItems = SFTPItem.modifiableSelection(from: items, selectedPaths: ids)
+        if !selectedItems.isEmpty {
+            Button("下载选中的 \(selectedItems.count) 个项目") {
+                downloadBatchAction(selectedItems)
+            }
+            Divider()
+            Button(role: .destructive) {
+                batchItemsToDelete = selectedItems
+            } label: {
+                Label("删除选中的 \(selectedItems.count) 个项目", systemImage: "trash")
+            }
+            Divider()
         }
-        Divider()
-        Button(role: .destructive) {
-            batchItemsToDelete = selectedItems
-        } label: {
-            Label("删除选中的 \(selectedItems.count) 个项目", systemImage: "trash")
-        }
-        Divider()
         Button("复制所有选中远程路径") {
-            let joined = selectedItems.map(\.path).joined(separator: "\n")
+            let paths = items.filter { ids.contains($0.path) && !$0.isParentNavigationEntry }.map(\.path)
+            let joined = paths.joined(separator: "\n")
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(joined, forType: .string)
         }
@@ -896,15 +947,16 @@ public struct SFTPView: View {
     }
 
     private func performBatchDelete(_ targetItems: [SFTPItem]) {
-        guard let s = session, !targetItems.isEmpty else { return }
-        let pathsToRemove = Set(targetItems.map(\.path))
+        let safeItems = targetItems.filter(\.isModifiableRemoteItem)
+        guard let s = session, !safeItems.isEmpty else { return }
+        let pathsToRemove = Set(safeItems.map(\.path))
         withAnimation {
-            self.items.removeAll { pathsToRemove.contains($0.path) }
+            self.items.removeAll { pathsToRemove.contains($0.path) && $0.isModifiableRemoteItem }
             self.updateDisplayItems()
         }
         Task {
             var failed: [String] = []
-            for item in targetItems {
+            for item in safeItems {
                 do {
                     if item.isDirectory {
                         try await s.removeDirectory(remotePath: item.path, recursive: true)
@@ -917,7 +969,7 @@ public struct SFTPView: View {
             }
             await MainActor.run {
                 if failed.isEmpty {
-                    self.transferNotice = "已成功删除 \(targetItems.count) 个项目"
+                    self.transferNotice = "已成功删除 \(safeItems.count) 个项目"
                 } else {
                     self.transferNotice = "部分项目删除失败 (\(failed.joined(separator: ", ")))"
                 }
@@ -927,7 +979,7 @@ public struct SFTPView: View {
     }
 
     private func performDelete(_ item: SFTPItem) {
-        guard let s = session else { return }
+        guard let s = session, item.isModifiableRemoteItem else { return }
         withAnimation {
             self.items.removeAll { $0.path == item.path }
             self.updateDisplayItems()
@@ -1064,6 +1116,57 @@ public struct SFTPView: View {
             } catch {
                 await MainActor.run {
                     self.transferNotice = "修改权限失败: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func performCreateSymlink(targetItem: SFTPItem, linkName: String) {
+        let trimmed = linkName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let s = session else { return }
+        let parent = (targetItem.path as NSString).deletingLastPathComponent
+        let linkPath = parent == "/" ? "/\(trimmed)" : "\(parent)/\(trimmed)"
+        let cmd = SFTPInspectorHelper.buildSymlinkCommand(targetPath: targetItem.path, linkPath: linkPath)
+        Task {
+            do {
+                _ = try await s.executeCommand(cmd)
+                await MainActor.run {
+                    self.transferNotice = "已创建符号链接: \(trimmed)"
+                    self.loadDirectory(path: self.currentPath)
+                }
+            } catch {
+                await MainActor.run {
+                    self.transferNotice = "创建符号链接失败: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func performServerSideDuplicate(_ item: SFTPItem) {
+        guard item.isModifiableRemoteItem, let s = session else { return }
+        let existingNames = Set(items.map(\.name))
+        let dupName = SFTPInspectorHelper.defaultDuplicateName(
+            for: item.name,
+            isDirectory: item.isDirectory,
+            existingNames: existingNames
+        )
+        let parent = (item.path as NSString).deletingLastPathComponent
+        let destPath = parent == "/" ? "/\(dupName)" : "\(parent)/\(dupName)"
+        let cmd = SFTPInspectorHelper.buildServerSideDuplicateCommand(
+            sourcePath: item.path,
+            destinationPath: destPath,
+            isDirectory: item.isDirectory
+        )
+        Task {
+            do {
+                _ = try await s.executeCommand(cmd)
+                await MainActor.run {
+                    self.transferNotice = "已创建副本: \(dupName)"
+                    self.loadDirectory(path: self.currentPath)
+                }
+            } catch {
+                await MainActor.run {
+                    self.transferNotice = "创建副本失败: \(error.localizedDescription)"
                 }
             }
         }
@@ -1423,22 +1526,62 @@ public struct SFTPView: View {
         }
     }
 
-    private func formatDate(_ date: Date) -> String {
+    private static let rowDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd HH:mm"
-        return formatter.string(from: date)
+        return formatter
+    }()
+
+    public static func formatRowDate(_ date: Date) -> String {
+        rowDateFormatter.string(from: date)
+    }
+
+    private func formatDate(_ date: Date) -> String {
+        Self.formatRowDate(date)
     }
 }
 
 // MARK: - SFTP Drag & Drop Export Helper
 public enum SFTPDragExportHelper {
+    /// Removes stale temporary drag-export directories older than `maxAgeSeconds` (default 1 hour).
+    @discardableResult
+    public static func cleanupStaleDragExportDirectories(
+        in rootDir: URL? = nil,
+        olderThan maxAgeSeconds: TimeInterval = 3600,
+        now: Date = Date()
+    ) -> Int {
+        let baseDir = rootDir ?? FileManager.default.temporaryDirectory
+            .appendingPathComponent("ApexTermTransfers", isDirectory: true)
+        guard let children = try? FileManager.default.contentsOfDirectory(
+            at: baseDir,
+            includingPropertiesForKeys: [.contentModificationDateKey, .creationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return 0
+        }
+        var removedCount = 0
+        for url in children {
+            let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey])
+            let timestamp = values?.contentModificationDate ?? values?.creationDate ?? .distantPast
+            if now.timeIntervalSince(timestamp) >= maxAgeSeconds {
+                if (try? FileManager.default.removeItem(at: url)) != nil {
+                    removedCount += 1
+                }
+            }
+        }
+        return removedCount
+    }
+
     public static func makeItemProvider(
         for item: SFTPItem,
         session: (any SSHSessionProtocol)?,
         onStatusChange: (@Sendable @MainActor (String) -> Void)? = nil
     ) -> NSItemProvider {
-        let tempDir = FileManager.default.temporaryDirectory
+        let transfersRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("ApexTermTransfers", isDirectory: true)
+        _ = cleanupStaleDragExportDirectories(in: transfersRoot)
+        let tempDir = transfersRoot
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let localURL = tempDir.appendingPathComponent(item.name)
 

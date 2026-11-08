@@ -342,7 +342,8 @@ private struct BehaviorSettingsTab: View {
                             tint: ApexStyle.secondary,
                             size: .small
                         ) {
-                            let url = URL(fileURLWithPath: settings.sessionLogDirectory, isDirectory: true)
+                            let expanded = (settings.sessionLogDirectory as NSString).expandingTildeInPath
+                            let url = URL(fileURLWithPath: expanded, isDirectory: true)
                             try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
                             NSWorkspace.shared.open(url)
                         }
@@ -552,7 +553,16 @@ private struct BackupSettingsTab: View {
                         .font(.caption)
                         .foregroundColor(ApexStyle.secondary)
                     
-                    HStack(spacing: 12) {
+                    HStack(spacing: 10) {
+                        ApexActionButton(
+                            "导出零凭据分享包 (.aetherpack)",
+                            icon: "shippingbox.and.arrow.backward",
+                            tint: ApexStyle.accent,
+                            size: .small
+                        ) {
+                            exportSharePack()
+                        }
+
                         ApexActionButton(
                             L10n.exportButton,
                             icon: "square.and.arrow.up",
@@ -569,6 +579,15 @@ private struct BackupSettingsTab: View {
                             size: .small
                         ) {
                             importSessions()
+                        }
+
+                        ApexActionButton(
+                            "导出 OpenSSH Config",
+                            icon: "doc.text",
+                            tint: ApexStyle.secondary,
+                            size: .small
+                        ) {
+                            exportOpenSSHConfig()
                         }
                     }
                     .padding(.top, 4)
@@ -609,10 +628,15 @@ private struct BackupSettingsTab: View {
         }
     }
     
-    private func formattedDate(_ date: Date) -> String {
+    private static let syncDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd HH:mm"
-        return formatter.string(from: date)
+        return formatter
+    }()
+
+    private func formattedDate(_ date: Date) -> String {
+        Self.syncDateFormatter.string(from: date)
     }
     
     private func runManualSync() {
@@ -639,10 +663,7 @@ private struct BackupSettingsTab: View {
         isSyncingAction = true
         Task {
             do {
-                let old = syncManager.conflictStrategy
-                syncManager.conflictStrategy = .overwriteCloud
-                let res = try await syncManager.syncNow()
-                syncManager.conflictStrategy = old
+                let res = try await syncManager.syncNow(withTemporaryStrategy: .overwriteCloud)
                 await MainActor.run {
                     isSyncingAction = false
                     alertMessage = res.message
@@ -662,10 +683,7 @@ private struct BackupSettingsTab: View {
         isSyncingAction = true
         Task {
             do {
-                let old = syncManager.conflictStrategy
-                syncManager.conflictStrategy = .overwriteLocal
-                let res = try await syncManager.syncNow()
-                syncManager.conflictStrategy = old
+                let res = try await syncManager.syncNow(withTemporaryStrategy: .overwriteLocal)
                 await MainActor.run {
                     isSyncingAction = false
                     alertMessage = res.message
@@ -709,11 +727,62 @@ private struct BackupSettingsTab: View {
         if openPanel.runModal() == .OK, let url = openPanel.url {
             do {
                 let data = try Data(contentsOf: url)
-                let count = try SessionStore.shared.importSessionsJSON(from: data, overwrite: false)
-                alertMessage = String(format: L10n.importSuccess, count)
+                let report = try SessionBundleExporter.importSharePackData(
+                    data,
+                    into: SessionStore.shared,
+                    bookmarkManager: SFTPBookmarkManager.shared,
+                    tunnelManager: SSHTunnelManager.shared,
+                    overwriteExisting: false
+                )
+                alertMessage = report.summaryText
                 isShowingAlert = true
             } catch {
                 alertMessage = L10n.importFailure
+                isShowingAlert = true
+            }
+        }
+    }
+
+    private func exportSharePack() {
+        let savePanel = NSSavePanel()
+        savePanel.allowedContentTypes = [.json]
+        savePanel.nameFieldStringValue = "aetherterm-team-bundle.aetherpack.json"
+        savePanel.prompt = "导出分享包"
+
+        if savePanel.runModal() == .OK, let url = savePanel.url {
+            do {
+                let store = SessionStore.shared
+                let data = try SessionBundleExporter.exportSharePackData(
+                    sessions: store.sessions,
+                    snippets: store.snippets,
+                    triggers: store.triggers,
+                    bookmarks: SFTPBookmarkManager.shared.customBookmarks,
+                    tunnels: SSHTunnelManager.shared.tunnels,
+                    appVersion: UpdateManager.shared.currentVersion
+                )
+                try data.write(to: url, options: .atomic)
+                alertMessage = "已成功导出零凭据分享包 (.aetherpack.json)"
+                isShowingAlert = true
+            } catch {
+                alertMessage = "导出分享包失败: \(error.localizedDescription)"
+                isShowingAlert = true
+            }
+        }
+    }
+
+    private func exportOpenSSHConfig() {
+        let savePanel = NSSavePanel()
+        savePanel.nameFieldStringValue = "ssh_config"
+        savePanel.prompt = "导出 OpenSSH Config"
+
+        if savePanel.runModal() == .OK, let url = savePanel.url {
+            do {
+                let configText = SessionBundleExporter.generateOpenSSHConfig(from: SessionStore.shared.sessions)
+                try configText.write(to: url, atomically: true, encoding: .utf8)
+                alertMessage = "已成功导出标准 OpenSSH Config 文件"
+                isShowingAlert = true
+            } catch {
+                alertMessage = "导出 OpenSSH Config 失败: \(error.localizedDescription)"
                 isShowingAlert = true
             }
         }

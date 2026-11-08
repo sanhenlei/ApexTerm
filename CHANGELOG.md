@@ -36,6 +36,217 @@
 - 更新 `TitlebarZoomAndUIRegressionTests` 快捷命令栏布局回归至新构造接口；
 - AppStore 沙盒渠道下工作目录访问全程经 `FileAccessStore` 安全作用域书签与租约。
 
+## [v1.23.3] - 2026-11-08
+
+### ⚡️ 体验优化 (Improvements)
+- **SFTP 文件列表与设置面板共享 `DateFormatter` 零分配渲染 (`SFTPView` & `BackupSettingsTab` & `SessionLogger`)**：
+  - 消除 `SFTPView.formatDate(_:)` 在每一行文件单元格渲染时重复实例化 `DateFormatter()` 的高频内存分配开销，改为复用静态 `POSIX` 格式器，5,000 行时间戳格式化耗时低于 `15ms`，显著提升大目录 120Hz 滚动帧率稳定性；
+- **会话编辑弹窗证书状态横幅按需缓存 (`SessionEditModal.inspectCertificateFile`)**：
+  - 修复 `SessionEditModal.certificateStatusBanner` 在每次 SwiftUI 视图求值（如键入主机名、用户名或密码）时同步读取磁盘证书文件的问题，改为在初始加载与 `certificatePath` 变更时按需解析并缓存至 `@State`，实现表单键入零磁盘 I/O 阻塞；
+- **SFTP 拖拽导出临时目录过期自动回收 (`SFTPDragExportHelper.cleanupStaleDragExportDirectories`)**：
+  - 在发起 Finder 拖拽导出时自动扫描并清理 `ApexTermTransfers` 临时目录下超过 1 小时的陈旧传输子目录，杜绝临时中转文件残留占用磁盘；
+- **会话备份导入悬挂跳板机引用自动净化 (`SessionStore.sanitizeJumpServerReferences`)**：
+  - 在 `importSessionsJSON` 与 `replaceAllSessions` 导入会话时自动清理指向不存在会话 UUID 或自引用的悬挂 `jumpServerId` 并将空白分组名归一化为「常用会话」。
+
+### 🧪 质量门禁与性能对比 (Verification & Benchmarks)
+- 新增 `CodeReviewRegressionTests` `TC-REV-59 ~ TC-REV-61` 共 3 项自动化测试，覆盖 SFTP 5,000 行共享日期格式器性能断言与拖拽临时目录清理、证书状态按需解析以及会话导入悬挂跳板机引用净化；
+- 全量自动化测试用例 100% 绿色通过（0 failures），Swift 6 模式零警告。
+
+## [v1.23.2] - 2026-11-08
+
+### 🐞 问题修复 (Bug Fixes)
+- **标签页与分屏关闭时的僵尸重连与内存驻留修复 (`TerminalTabItem.tearDown` & `TerminalPaneItem.tearDown`)**：
+  - 修复关闭终端标签页（`closeTab` / `closeOtherTabs` / `closeTabsToTheRight` / `closeCurrentConnection`）或关闭分屏（`closePane`）时，仅调用 `sshClient.disconnect()` 而未取消自动重连退避定时器（`autoReconnectTask`）、未关闭审计日志句柄（`SessionLogger`）、未解绑 `SSH` 回调闭包且未清空 `ringBuffer` 与 `ObservableMetricsHistory` 快照的问题；
+  - 新增 `TerminalPaneItem.tearDown()`、`TerminalTabItem.tearDown()` 与 `ObservableMetricsHistory.clear()`，彻底阻断已关闭标签页在网络闪断退避期结束后触发僵尸重连，并实现关闭标签页即刻 100% 回收回滚缓冲区与监控历史内存。
+- **非阻塞 PTY 大文本粘贴截断修复 (`NativeSSHSession.writePTYInput` & `LocalTerminalSession.sendInputSync`)**：
+  - 修复在 `O_NONBLOCK` 终端主描述符下一次性粘贴数千行文本时，内核 PTY 缓冲区满返回 `EAGAIN` / `EWOULDBLOCK` 导致后续字节被静默丢弃的问题；`writePTYInput` 新增 `EAGAIN` 自适应微秒级退避重试，`LocalTerminalSession.sendInputSync` 同步接入分块完整写入与大负载异步队列分发。
+- **SFTP 传输历史记录自动容量裁剪 (`TransferManager.maxCompletedHistory`)**：
+  - 为 `TransferManager` 新增 `maxCompletedHistory = 200` 已完成/失败/取消任务自动裁剪机制（保留全部排队与传输中活跃任务），防止长期高频传输文件后已完成任务列表与采样字典无限累积。
+
+### 🧪 质量门禁与性能对比 (Verification & Benchmarks)
+- 新增 `CodeReviewRegressionTests` `TC-REV-56 ~ TC-REV-58` 共 3 项自动化测试，覆盖标签页/分屏 `tearDown()` 防僵尸重连与内存清空、`O_NONBLOCK` 管道 `EAGAIN` 256KB 零丢失写入以及 `TransferManager` 历史记录上限自动裁剪；
+- 全量自动化测试用例 100% 绿色通过（0 failures），Swift 6 模式零警告。
+
+## [v1.23.1] - 2026-11-08
+
+### ⚡️ 体验优化 (Improvements)
+- **终端引擎回滚内存即时回收 (`TerminalRingBuffer.clear` & `resetTerminalState`)**：
+  - 修复 `clear()`（`⌘K` 清空回滚）与 `RIS` 全终端重置（`\ec`）仅将环形缓冲区游标 `head`/`count` 置零而未释放底层 `buffer: [String]` 槽位中残留字符串对象的问题；现在清空或重置终端时立即清空全量历史字符串槽位、释放 `activeCells` 额外容量并重置 `OSC 133` Shell 集成记录；
+- **24-bit TrueColor 颜色缓存容量硬上限保护 (`NativeTerminalView.colorCache`)**：
+  - 为 `NativeTerminalView` 静态 `colorCache` 增设 `maxColorCacheEntries = 1024` 容量上限保护，防止长时间运行 `btop`、`cmatrix` 或 24-bit 渐变动画时静态颜色字典无限膨胀；
+- **终端视图拆卸生命周期闭环 (`TerminalRepresentable.dismantleNSView` & `tearDown`)**：
+  - 新增 `TerminalRepresentable.dismantleNSView`、`NativeTerminalScrollView.tearDown()` 与 `NativeTerminalView.tearDown()`，在分屏或标签页关闭销毁时主动注销 `NotificationCenter` / `NSWorkspace` 监听器、停止光标闪烁定时器、取消防抖尺寸调整任务、解绑 `ringBuffer.onUpdate` 闭包并清空 `NSTextStorage`；
+- **设置面板字体发现主线程提速 6x (`TerminalFontManager.availableFonts`)**：
+  - 新增 `isLikelyMonospaceFamily` 候选字体族预筛机制，避免首次打开「设置 -> 外观」时在主线程同步实例化数百个中文字体与装饰字体族，将字体枚举耗时从 `~756ms` 降低至 `~120ms`。
+
+### 🧪 质量门禁与性能对比 (Verification & Benchmarks)
+- 新增 `CodeReviewRegressionTests` `TC-REV-52 ~ TC-REV-55` 共 4 项自动化测试，覆盖 `RingBuffer` 内存槽位清零与 `OSC 133` 重置、TrueColor 缓存 1024 上限保护、终端视图 `tearDown()` 引用解绑以及主线程字体快速枚举性能断言；
+- 全量自动化测试用例 100% 绿色通过（0 failures），Swift 6 模式零警告。
+
+## [v1.23.0] - 2026-11-08
+
+### ✨ 新增特性 (Features)
+- **会话配置导入导出中心与零凭据团队分享包 (`SessionBundleExporter` & `AetherSharePack`)**：
+  - 设置中心「数据与云同步」新增「导出零凭据分享包 (`.aetherpack`)」与「导出 OpenSSH Config」功能，支持将远程会话、快捷命令片段 (`Snippet`)、终端高亮触发器 (`TerminalTrigger`)、SFTP 书签与 SSH 端口转发隧道一键打包为 `.aetherpack.json` 归档或按项目分组导出；
+  - **零捆绑安全红线脱敏 (`sanitizeSessionForShare`)**：分享包导出时自动剥离所有密码/口令钥匙串引用、阻断私钥 PEM 明文块与 `vault://` 内部引用、过滤敏感环境变量，并将本机绝对路径 `/Users/<name>/.ssh/...` 归一化为跨设备通用的 `~/.ssh/...` 路径；
+  - **智能去重合并与跳板机关系重映射 (`importSharePackData`)**：导入分享包（同时向下兼容旧版 `[Session]` JSON 备份）时自动按 `(host, port, username, name)` 识别并跳过重复会话，当跳板机已存在于本地时自动将依赖会话的 `jumpServerId` 重映射至本地跳板机 UUID；
+  - **反向生成标准 OpenSSH `~/.ssh/config` (`generateOpenSSHConfig`)**：支持将当前会话列表一键导出为符合 OpenSSH 规范的 `ssh_config` 配置文件（完整映射 `Host` 重名消歧、`HostName`、`User`、`Port`、`IdentityFile`、`CertificateFile`、`ProxyJump`、`SetEnv` 与 `RemoteCommand`），并支持与 `SSHConfigParser` 双向无损往返。
+
+### 🧪 质量门禁与性能对比 (Verification & Benchmarks)
+- 新增 `SessionBundleExportImportTests`（`TC-PACK-01 ~ TC-PACK-08`）与 `CodeReviewRegressionTests` `TC-REV-51` 共 9 项自动化测试，覆盖 `.aetherpack` 全量序列化、零凭据脱敏与路径归一化、按分组导出、智能去重合并、跳板机 UUID 重映射及 OpenSSH Config 双向往返校验；
+- 全量自动化测试用例 100% 绿色通过（0 failures），Swift 6 模式零警告。
+
+## [v1.22.0] - 2026-11-08
+
+### ✨ 新增特性 (Features)
+- **已知主机指纹管理器 (`KnownHostsManager` & `KnownHostsSettingsView`)**：
+  - 设置中心「密钥保险库」新增「SSH 密钥 / 主机指纹 (`known_hosts`)」双视图切换，可视化审查本机 `~/.ssh/known_hosts` 中的所有受信任主机公钥条目；
+  - 完整解析标准 `host,ip` 多主机行、非标端口 `[host]:2222`、`@cert-authority` 证书颁发机构、`@revoked` 吊销标记以及 `|1|salt|hash` 哈希混淆主机记录，并基于 CryptoKit 实时计算与 OpenSSH `ssh-keygen -lf` 完全一致的 `SHA256:<base64>` 指纹；
+  - **主机重装公钥冲突自动侦测与一键修复**：自动检测同一端点（含 `[host]:22` 与裸 `host` 归一化）下存在多个不同公钥指纹的冲突状态（`REMOTE HOST IDENTIFICATION HAS CHANGED`），提供告警横幅与一键清理能力，无需手动编辑行号；
+  - **原子级 `.bak` 备份与多主机行无损剥离**：移除单条指纹或按端点清理时自动生成 `known_hosts.bak` 备份并完整保留注释行；当逗号分隔的多主机行仅移除其中一个 IP/域名时，自动保留同行其余兄弟主机记录。
+
+### 🧪 质量门禁与性能对比 (Verification & Benchmarks)
+- 新增 `KnownHostsManagerTests`（`TC-KH-01 ~ TC-KH-08`）与 `CodeReviewRegressionTests` `TC-REV-50` 共 9 项自动化测试，覆盖多格式 `known_hosts` 解析、OpenSSH `SHA256` 指纹计算、公钥冲突检测、`.bak` 原子备份与多主机同行兄弟节点无损保留；
+- 全量自动化测试用例 100% 绿色通过（0 failures），Swift 6 模式零警告。
+
+## [v1.21.0] - 2026-11-08
+
+### ✨ 新增特性 (Features)
+- **终端 Shell 集成引擎 (`ShellIntegrationTracker` & `OSC 133 / OSC 7 / OSC 1337`)**：
+  - `TerminalRingBuffer` 原生集成 `OSC 133`（FinalTerm / iTerm2 / VSCode 标准 Shell Integration `A` 提示符开始、`B` 命令输入开始、`C` 命令执行开始、`D;exitCode` 命令结束与退出码）以及 `OSC 7` / `OSC 1337` 远端工作目录追踪；
+  - 完整支持 `BEL` (`\u{07}`) 与跨分片 `ST` (`\e\\`) 两种终结符，确保控制序列零字符泄漏至可见终端，且 `BEL` 终结符绝不误触终端响铃；
+  - **精确命令输出提取与状态栏耗时/退出码徽章**：`⌘⌥C` 复制上一条命令输出时优先采用 `OSC 133` 精确行边界提取（自动剥离 ANSI 样式序列），底部状态栏新增最近命令执行耗时（`85ms` / `2.35s`）与退出码（`✓` / `✗ Exit <code>`）交互菜单，支持一键回溯复制历史命令文本或对应输出；
+  - **提示符书签导航 (`previousPromptLine` / `nextPromptLine`)**：自动记录每次提示符行号书签（带 FIFO 容量上限保护），支持在长输出历史中快速定位上下提示符边界。
+
+### 🧪 质量门禁与性能对比 (Verification & Benchmarks)
+- 新增 `ShellIntegrationTests`（`TC-SHELL-01 ~ TC-SHELL-08`）与 `CodeReviewRegressionTests` `TC-REV-49` 共 9 项自动化测试，覆盖 `OSC 133` 全生命周期解析、退出码与耗时计算、精确命令输出提取、提示符书签导航、`OSC 7`/`1337` 目录解析、FIFO 历史上限淘汰以及跨分片 `ST` 终结符重组；
+- 全量自动化测试用例 100% 绿色通过（0 failures），Swift 6 模式零警告。
+
+## [v1.20.0] - 2026-11-08
+
+### ✨ 新增特性 (Features)
+- **SFTP 远端文件属性巡检与云端 SHA-256 / MD5 完整性校验面板 (`SFTPFileInspectorSheet` & `SFTPInspectorHelper`)**：
+  - SFTP 右键菜单新增「属性与校验和 (SHA-256)...」，集中展示远端文件/目录的完整路径、精确字节大小、八进制与符号权限掩码（`0755 · drwxr-xr-x`，支持 `setuid`/`setgid`/`sticky` 特殊位）及修改时间；
+  - 支持在远端服务器直接计算文件的 `SHA-256` 或 `MD5` 摘要（自动适配 GNU `sha256sum`/`md5sum`、macOS/BSD `shasum -a 256`/`md5 -q` 及 `openssl dgst` 回退），无需将大体积镜像或归档包下载至本地即可完成校验；
+  - 内置「期望校验值比对」输入框：支持直接粘贴期望哈希值或完整 `SHA256SUMS.txt` 行，实时给出「校验一致」或「哈希不匹配」视觉徽章反馈。
+- **SFTP 服务器端快速克隆（`cp -pR`）与符号链接创建（`ln -s`）**：
+  - 右键菜单新增「在服务器端创建副本 (快速克隆)」与「创建符号链接 (ln -s)...」，支持在不经过本地网络中转的情况下直接在远端完成文件/目录克隆（智能识别 `.tar.gz` 等复合扩展名并自动生成无冲突的 `copy` / `copy 2` 副本名）及软链接创建。
+
+### 🧪 质量门禁与性能对比 (Verification & Benchmarks)
+- 新增 `SFTPInspectorAndChecksumTests`（`TC-SFTP-INSP-01 ~ TC-SFTP-INSP-08`）与 `CodeReviewRegressionTests` `TC-REV-48` 共 9 项自动化测试，覆盖八进制权限格式化、多平台 SHA-256/MD5 输出解析、哈希比对校验、软链接与服务端克隆命令安全转义及复合扩展名去重命名；
+- 全量自动化测试用例 100% 绿色通过（0 failures），Swift 6 模式零警告。
+
+## [v1.19.0] - 2026-11-08
+
+### ✨ 新增特性 (Features)
+- **远程端口监听与活跃套接字巡检器 (`ListeningPortItem` & `ListeningPortParser`)**：
+  - `AgentlessMonitor` 新增跨平台无代理监听端口探测指令 `listeningPortsProbeCommand`，自动适配 Linux `ss -tulpnH`、Linux `netstat -tulpn` 回退与 macOS / BSD `lsof -iTCP -sTCP:LISTEN -P -n`；
+  - `ProcessInspectorView`（`⌘⌥K`）新增「活跃进程 / 监听端口」双视图切换，实时呈现远程主机所有 TCP/UDP 监听端点、PID 与所属进程，并支持按端口号、进程名、协议或暴露范围即时过滤；
+  - **公网暴露风险智能徽章**：自动识别通配符（`0.0.0.0`、`*`、`::`、`::ffff:0.0.0.0`）及非回环网卡监听并标记「公网/全网卡」告警圆点，与 `127.0.0.1` / `::1` / `127.0.0.53%lo` 等「本地回环」服务清晰区分；
+  - **一键转本地 SSH 转发隧道（`-L`）**：在监听端口行点击「转本地隧道」即可通过 `toLocalForwardingTunnel` 自动生成无冲突的本地端口转发隧道（对 `< 1024` 特权端口自动映射至 `10000+` 高位端口，并自动规避已有本地隧道占用端口）。
+
+### 🧪 质量门禁与性能对比 (Verification & Benchmarks)
+- 新增 `ListeningPortInspectorTests`（`TC-PORT-01 ~ TC-PORT-08`）与 `CodeReviewRegressionTests` `TC-REV-47` 共 9 项自动化测试，覆盖 Linux `ss`/`netstat` 与 macOS `lsof` 解析、IPv4/IPv6/网卡作用域与 IPv4 映射地址识别、多 Worker 进程监听去重排序、关键字过滤以及无冲突本地隧道自动生成；
+- 全量自动化测试用例 100% 绿色通过（0 failures），Swift 6 模式零警告。
+
+## [v1.18.0] - 2026-11-08
+
+### ✨ 新增特性 (Features)
+- **会话登录启动脚本与环境变量注入引擎 (`SessionStartupHelper`)**：
+  - `Session` 模型新增向下兼容的三大自动化登录字段：初始工作目录（`initialWorkingDirectory`）、登录后自动执行命令（`startupCommand`）与自定义环境变量字典（`environmentVariables`）；
+  - `SessionEditModal` 新增符合 `ApexStyle` 规范的「登录启动与环境变量」配置分组，支持配置初始远端/本地目录（如 `/var/www/app` 或 `~/workspace`）、自动挂载命令（如 `tmux attach -t main || tmux new -s main`）与多行 `KEY=VALUE` 环境变量，并内置实时变量名语法校验；
+  - `TerminalTabItem` 在首次连接建立后自动执行单引号安全转义的复合引导脚本（`export ... && cd ... && <cmd>`），并自动将 SFTP 文件浏览器的初始路径对齐至 `initialWorkingDirectory`；
+  - `LocalTerminalSession` 原生支持在 `posix_spawnp` 阶段直接切换至 `initialWorkingDirectory` 并注入经白名单校验的环境变量。
+
+### 🛡️ 安全与云同步加固 (Security & Cloud Sync)
+- **动态链接器注入防护与 iCloud 敏感环境变量零捆绑脱敏**：
+  - `SessionStartupHelper.isValidEnvKey` 严格遵循 POSIX 标识符规范，并主动拦截 `LD_PRELOAD`、`DYLD_INSERT_LIBRARIES`、`BASH_ENV`、`PROMPT_COMMAND` 等高危注入变量；
+  - `iCloudSyncManager.sanitizeForCloud` 自动识别并剥离包含 `SECRET`、`TOKEN`、`PASSWORD`、`PRIVATE_KEY`、`API_KEY`、`CREDENTIAL` 等敏感关键字的环境变量，确保云端同步零明文凭据泄漏。
+
+### 🧪 质量门禁与性能对比 (Verification & Benchmarks)
+- 新增 `SessionStartupEngineTests`（`TC-START-01 ~ TC-START-08`）与 `CodeReviewRegressionTests` `TC-REV-46` 共 9 项自动化测试，覆盖历史会话 JSON 向下兼容、环境变量多行解析与黑名单拦截、含空格/`~` 路径的安全引用、复合启动命令构建、本地终端环境注入、iCloud 敏感变量脱敏与会话克隆/合并保留；
+- 全量自动化测试用例 100% 绿色通过（0 failures），Swift 6 模式零警告。
+
+## [v1.17.5] - 2026-11-07
+
+### ⚡️ 体验优化 (Improvements)
+- **SSH 端口转发隧道（`-L` / `-R` / `-D`）IPv6 地址规范化与远端/本地端口冲突域隔离**：
+  - `SSHTunnel.formatForwardingHost` 与 `SSHTunnelManager.buildSSHArguments` 自动将裸 IPv6 地址（如 `::1`、`2001:db8::1`）包裹为标准方括号语法（`[::1]:8080:[2001:db8::20]:80` 与 `user@[2001:db8::10]`），避免 IPv6 冒号与 OpenSSH 转发分隔符冲突导致启动失败；
+  - `SSHTunnelManager.hasPortConflict` 区分远端绑定（`.remote` `-R`，作用域为目标远程服务器 `sessionId`）与本地绑定（`.local` `-L` / `.dynamic` `-D`，作用域为本机），彻底消除本地隧道与远端反向隧道或不同服务器间远端反向隧道的误报端口冲突。
+- **`~/.ssh/config` 主机重新导入的无损增量合并（`SSHConfigHost.mergedSession`）**：
+  - 重新导入已存在的同名主机时，在同步更新 `HostName`、`Port`、`User` 与认证路径的同时，完整保留用户自定义的会话分组（`folder`）、标签（`tags`）、标识颜色（`colorHex`）、跳板机（`jumpServerId`）、保活间隔（`keepAliveIntervalSeconds`）、终端类型（`terminalType`）、历史连接时间戳及同私钥绑定的钥匙串 `passphraseRef`。
+- **进程巡检器（`ProcessInspector`）非 systemd 宿主环境自适应探测**：
+  - `AgentlessMonitor.systemdServicesProbeCommand` 新增 `command -v systemctl` 前置守卫，`ProcessListParser.parseSystemdServices` 在无 `systemctl` 环境（如 macOS 本地终端、Alpine OpenRC、BSD 主机）下自动返回空服务列表，不再渲染 6 个伪造的 `inactive` systemd 服务状态条。
+
+### 🐞 问题修复 (Bug Fixes)
+- **修复 SFTP 文件浏览器右键或全选（`⌘A`）包含上级目录 `".."` 时可触发误删父目录的高危隐患**：
+  - `SFTPItem` 新增 `isParentNavigationEntry`、`isModifiableRemoteItem` 与批量过滤方法 `SFTPItem.modifiableSelection(from:selectedPaths:)`；
+  - `SFTPView` 在单文件右键菜单（`fileContextActions`）、多选右键菜单（`batchContextActions`）、单删（`performDelete`）与批量删除（`performBatchDelete`）全链路强制拦截 `".."` 与根目录 `"/"`，右键 `".."` 仅提供「返回上级目录」与「复制远程路径」。
+- **修复会话编辑弹窗（`SessionEditModal`）重新打开时不回显已绑定的密钥保险库条目及切回手动模式残留 `vault.priv.*` 引用的问题**：
+  - `SessionEditModal` 新增 `matchedVaultKeyId(forPrivateKeyPath:keys:)` 与 `resolvedPrivateKeyPathAfterPickerChange`，在加载私钥/证书会话时自动匹配并选中对应的保险库密钥，切回「手动指定路径 / 文件」时自动清空内部 `vault.priv.<UUID>` 引用。
+- **修复 macOS / BSD 全路径守护进程（如 `/usr/sbin/sshd`、`/sbin/launchd`）绕过关键进程防误杀保护的问题**：
+  - `ProcessDetailItem.isProtected` 同时校验命令名与可执行文件 `lastPathComponent` 基名，`ProcessListParser.parsePSOutput` 自动将 `comm` 列的全路径归一化为二进制短名并保留完整 `fullCommandLine`。
+
+### 🧪 质量门禁与性能对比 (Verification & Benchmarks)
+- 新增 `CodeReviewRegressionTests` `TC-REV-41 ~ TC-REV-45` 共 5 项 TDD 回归测试（累计 45 项代码审查回归测试），覆盖 SFTP `".."` 与 `"/"` 防误删保护、会话编辑弹窗密钥保险库双向同步、全路径核心进程保护与非 systemd 宿主探测、SSH 隧道 IPv6 语法及远端/本地端口冲突域隔离、`~/.ssh/config` 重新导入无损合并；
+- 全量自动化测试用例 100% 绿色通过（0 failures），Swift 6 模式零警告；
+- 8 大性能 Benchmark 与 Tart VM 真实集成质量门禁全量达标，通过 Developer ID 官方签名与 Apple 生产级安全公证。
+
+## [v1.17.4] - 2026-11-07
+
+### ⚡️ 体验优化 (Improvements)
+- **终端响铃（BEL `\u{07}`）通知与视觉闪烁反馈全链路打通**：
+  - `TerminalRingBuffer` 新增独立终端响铃控制符（`0x07`）原子状态捕获 `consumeBellFlag()`（严格排除 OSC 窗口标题转义序列结束符 `\u{07}` 的误触发）；
+  - `NativeTerminalView.refresh()` 完整对接「设置 -> 终端 -> 终端响铃通知 (`bellMode`)」三态配置：支持系统提示音（`.audible`）、基于 CoreAnimation 硬件加速图层的平滑视觉闪烁提示（`.visual`）与静默模式（`.none`）。
+- **增强型 ECMA-48 / ITU T.416 冒号分隔 SGR 子参数与中间字节 CSI 序列兼容**：
+  - `VTParser` 与 `SGRStyle.apply(param:)` 新增对现代 CLI 工具（如 Neovim、tmux、delta、git diff）发出的冒号分隔 TrueColor/256 色子参数（`\e[38:2:R:G:B`、`\e[38:2::R:G:B`、`\e[38:5:N`）、波浪下划线子参数（`\e[4:3m` / `\e[4:0m`）以及带中间字节的 CSI 序列（如 `\e[6 q` 光标样式控制）的原生解析支持，彻底杜绝复杂 CSI 序列泄漏为终端可见乱码文本。
+- **终端 URL 识别引擎静态预编译加速**：
+  - `NativeTerminalView.detectURLs` 将 `NSDataDetector` 升级为线程安全的静态预编译单例 `linkDetector`，消除按住 `⌘` 移动鼠标时在主线程高频重复编译正则表达式的开销。
+
+### 🐞 问题修复 (Bug Fixes)
+- **修复「选中即复制 (`isCopyOnSelectEnabled`)」开关被视图刷新重置及右键菜单无条件覆盖剪贴板的问题**：
+  - `WorkspaceView` 向 `TerminalRepresentable` 显式绑定 `themeSettings.isCopyOnSelectEnabled`，修复关闭「选中即复制」后在分屏或焦点切换时被默认参数重置回 `true` 的问题；
+  - `NativeTerminalView.menu(for:)` 在弹出右键菜单前严格检查 `isCopyOnSelectEnabled`，防止用户关闭「选中即复制」后准备右键粘贴时剪贴板被当前终端选区内容意外覆盖。
+- **修复 SFTP 传输任务抽屉无法清理失败记录及速率采样字典残留问题**：
+  - `TransferStatus` 新增 `isTerminal` 终态判定（涵盖 `.completed`、`.cancelled` 与 `.failed`），修复 `TransferManager.clearCompleted()` 与 `TransferDrawer`「清空记录」按钮忽略失败任务导致失败条目永久驻留抽屉的问题；
+  - `TransferManager` 新增单条任务移除接口 `removeTask(id:)` 并在失败任务行提供一键移除按钮，同时在任务取消与清理时同步回收 `lastSpeedSampleTime` 与 `lastSampledBytes` 字典采样状态。
+- **修复 iCloud 强制上传/下载异常中断时污染全局冲突解决策略及日志目录 `~` 未展开的问题**：
+  - `iCloudSyncManager` 新增 `syncNow(withTemporaryStrategy:)` 并通过 `defer` 保证在云端不可用或同步抛出异常时无条件还原用户原有的 `conflictStrategy`；
+  - 「设置 -> 行为 -> 打开目录」在创建并打开会话审计日志目录前自动执行 `expandingTildeInPath` 路径展开。
+
+### 🧪 质量门禁与性能对比 (Verification & Benchmarks)
+- 新增 `CodeReviewRegressionTests` `TC-REV-36 ~ TC-REV-40` 共 5 项 TDD 回归测试（累计 40 项代码审查回归测试），覆盖选中即复制与右键菜单剪贴板保护、终端响铃控制符精准识别与视觉闪烁、SFTP 失败任务清理与速率字典回收、冒号分隔 SGR / 中间字节 CSI 解析以及 iCloud 临时策略异常恢复；
+- 全量自动化测试用例 100% 绿色通过（0 failures），Swift 6 模式零警告；
+- 8 大性能 Benchmark 与 Tart VM 真实集成质量门禁全量达标，通过 Developer ID 官方签名与 Apple 生产级安全公证。
+
+## [v1.17.3] - 2026-11-07
+
+### ⚡️ 体验优化 (Improvements)
+- **密钥保险库（SSH Key Vault）全链路连接与隧道无缝认证支持**：
+  - `SSHKeyVaultManager` 新增安全受控的私钥物化机制（`materializePrivateKeyPath`），在连接与隧道启动时将 Keychain 中的 `vault.priv.<UUID>` 引用按需物化为仅当前用户可读写的 `0600` 临时密钥文件（自动补齐 OpenSSH 必需的末尾换行符，并在密钥删除或应用退出时自动清理）；
+  - `SSHTunnelManager.resolveSecret` 支持在未单独指定会话口令时自动回退读取保险库密钥配对的 `vault.pass.<UUID>` 口令，打通「从密钥库选择」在终端会话、连接测试与端口转发隧道中的全流程使用。
+- **全局命令面板（`⌘P`）与侧边栏快捷命令交互式填参统一**：
+  - `Snippet` 新增 `unresolvedVariables(context:)` 占位符检测，统一 `WorkspaceView.executeSnippet`、命令面板（`⌘P`）与侧边栏快捷命令执行入口：当命令包含 `{{container}}`、`{{service}}`、`{{port}}` 等未解析变量时自动弹出参数输入面板（`VariableInputSheet`），杜绝将原始占位符文本直接发往终端。
+- **SSH 隧道跳板机（`-J`）支持与 `stderr` 异步非阻塞排空**：
+  - `SSHTunnelManager.buildSSHArguments` 新增跳板机 `jumpSession`（`-J user@jumpHost:jumpPort`）参数生成与 `~` 路径自动展开；
+  - 隧道子进程 `stderr` 管道挂载非阻塞 `readabilityHandler` 滚动缓存最近 8KB 诊断摘要，消除长连接隧道累计告警超出 64KB 管道缓冲区导致的子进程写阻塞。
+
+### 🐞 问题修复 (Bug Fixes)
+- **修复「复制会话」共享同一 Keychain 引用导致修改副本密码篡改原会话密码的问题**：
+  - `SessionStore.duplicateSession` 为复制出的新会话生成独立的 `ssh_<newUUID>` / `passphrase_<newUUID>` 引用并克隆原密文，彻底隔离原会话与副本的钥匙串凭据；
+- **修复删除会话遗留孤儿 Keychain 密文、残留关联隧道与跳板机悬挂引用的问题**：
+  - `SessionStore.deleteSession` 删除会话时同步清理无其他会话引用的受管钥匙串条目、停止并移除绑定该会话的 SSH 隧道，并将依赖该会话作为跳板机的其他会话 `jumpServerId` 自动置空；
+- **修复会话审计日志（`SessionLogger`）在跨分片中文 UTF-8 字节流下回退写入未脱敏原始 ANSI 流的问题**：
+  - `SessionLogger` 集成增量流式解码器 `UTF8StreamDecoder` 与预编译静态正则 `ansiRegex`，修复多字节中文字符跨 PTY `read()` 边界截断时跳过 ANSI 过滤的问题，同时支持 `logDirectoryPath` 的 `~` 路径展开与 `deinit` 句柄安全关闭；
+- **修复「恢复默认设置」遗漏审计日志配置及多端广播向已断开分屏发送输入的问题**：
+  - `AppSettings.resetToDefaults()` 补齐会话审计日志四项配置的默认值重置；
+  - `BroadcastBar` 与终端广播输入严格过滤 `pane.connectionState == .connected` 的在线分屏，并在顶部广播栏发送回车命令时同步触发目录联动刷新。
+
+### 🧪 质量门禁与性能对比 (Verification & Benchmarks)
+- 新增 `CodeReviewRegressionTests` `TC-REV-28 ~ TC-REV-35` 共 8 项 TDD 回归测试（累计 35 项代码审查回归测试），覆盖密钥库物化与口令回退、复制会话凭据隔离、删除会话级联清理、快捷命令占位符拦截、隧道跳板机参数构建、跨分片 UTF-8 审计日志解码、设置重置与广播分屏过滤；
+- 全量自动化测试用例 100% 绿色通过（0 failures），Swift 6 模式零警告；
+- 8 大性能 Benchmark 与 Tart VM 真实集成质量门禁全量达标，通过 Developer ID 官方签名与 Apple 生产级安全公证。
+
 ## [v1.17.2] - 2026-11-04
 
 ### ⚡️ 体验优化 (Improvements)
