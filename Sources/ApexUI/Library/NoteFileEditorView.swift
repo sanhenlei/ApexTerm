@@ -79,10 +79,10 @@ struct NoteFileEditorView: View {
                 .frame(width: 150)
 
                 ApexIconButton(
-                    icon: "checkmark.circle",
+                    icon: "floppy.disk",
                     label: "保存 (⌘S)",
                     size: 24,
-                    iconSize: 12,
+                    iconSize: 11,
                     isSelected: true
                 ) {
                     onSave()

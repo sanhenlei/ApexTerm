@@ -23,7 +23,17 @@ public struct ThemePalette: Sendable {
         self.accent = Self.readable(accent, on: backgrounds)
         self.success = Self.readable(success, on: backgrounds)
         self.warning = Self.readable(warning, on: backgrounds)
-        self.ansi = ansi.count == 16 ? ansi : ansi + ansi
+        if ansi.count == 16 {
+            self.ansi = ansi
+        } else {
+            // Bright black must not duplicate normal black: shells (zsh-autosuggestions
+            // fg=8 → SGR 90 / 38;5;8) emit gray for secondary text such as inline command
+            // suggestions; duplicating color 0 renders them in the same color as typed
+            // input, making them indistinguishable. Use a neutral gray for slot 8.
+            var bright = ansi
+            bright[0] = "#8E8E93"
+            self.ansi = ansi + bright
+        }
         self.terminalANSI = self.ansi.map { Self.readable($0, on: [terminal]) }
     }
     public var error: String { Self.readable(ansi[1], on: [surface, sidebar, selection]) }

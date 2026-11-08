@@ -23,7 +23,7 @@ struct LibraryFileRow: View {
         Button {
             onPrimary(NSEvent.modifierFlags.contains(.option))
         } label: {
-            HStack(spacing: 6) {
+            HStack(spacing: 5) {
                 Image(systemName: icon)
                     .font(.system(size: 10, weight: .medium))
                     .foregroundColor(iconColor)
@@ -33,45 +33,51 @@ struct LibraryFileRow: View {
                     .font(.system(size: 12))
                     .foregroundColor(ApexStyle.primary)
                     .lineLimit(1)
-
-                Spacer(minLength: 2)
-
-                if showsFillButton {
-                    ApexIconButton(
-                        icon: "arrow.down.to.line.compact",
-                        label: "填入终端",
-                        size: 18,
-                        iconSize: 8,
-                        tint: isHovered ? ApexStyle.success : nil
-                    ) {
-                        onFill?(NSEvent.modifierFlags.contains(.option))
-                    }
-                    .opacity(isHovered ? 1.0 : 0.0)
-                    .help("填入到终端不执行（⌥+点击填入并立即执行）")
-                }
-
-                ApexIconButton(
-                    icon: "pencil",
-                    label: "编辑 \(file.title)",
-                    size: 18,
-                    iconSize: 8,
-                    tint: isHovered ? ApexStyle.accent : nil
-                ) {
-                    onOpen()
-                }
-                .opacity(isHovered ? 1.0 : 0.0)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 1)
-            .padding(.horizontal, 4)
+            .padding(.horizontal, 2)
             .background(
                 RoundedRectangle(cornerRadius: ApexStyle.badgeRadius)
                     .fill(isHovered ? ApexStyle.primary.opacity(0.04) : Color.clear)
             )
             .contentShape(Rectangle())
+            .overlay(alignment: .trailing) {
+                // Hover actions float above the title so row width never depends on
+                // buttons; the hidden state also stops hit-testing stray clicks.
+                HStack(spacing: 4) {
+                    if showsFillButton {
+                        ApexIconButton(
+                            icon: "terminal",
+                            label: "填入终端",
+                            size: 18,
+                            iconSize: 9,
+                            tint: isHovered ? ApexStyle.success : nil
+                        ) {
+                            onFill?(NSEvent.modifierFlags.contains(.option))
+                        }
+                        .help("填入到终端不执行（⌥+点击填入并立即执行）")
+                    }
+                    ApexIconButton(
+                        icon: "pencil",
+                        label: "编辑 \(file.title)",
+                        size: 18,
+                        iconSize: 8,
+                        tint: isHovered ? ApexStyle.accent : nil
+                    ) {
+                        onOpen()
+                    }
+                }
+                .padding(.horizontal, 3)
+                .background(ApexStyle.surface.opacity(0.92), in: RoundedRectangle(cornerRadius: ApexStyle.badgeRadius))
+                .opacity(isHovered ? 1.0 : 0.0)
+                .allowsHitTesting(isHovered)
+            }
+            .padding(.leading, 2)
         }
         .buttonStyle(.plain)
         .help(showsFillButton
-              ? "点击打开编辑器；悬停「↓」填入终端不执行（⌥+点击立即执行）"
+              ? "点击打开编辑器；悬停终端图标「填入」不执行（⌥+点击立即执行）"
               : primaryActionLabel)
         .onHover { hovering in
             withAnimation(ApexStyle.hoverTransition) {

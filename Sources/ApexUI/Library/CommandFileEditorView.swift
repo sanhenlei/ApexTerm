@@ -68,7 +68,7 @@ struct CommandFileEditorView: View {
 
                 ApexActionButton(
                     "插入",
-                    icon: "arrow.down.to.line.compact",
+                    icon: "terminal",
                     tint: ApexStyle.secondary,
                     size: .small
                 ) {
@@ -87,10 +87,10 @@ struct CommandFileEditorView: View {
                 .disabled(tab.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
                 ApexIconButton(
-                    icon: "checkmark.circle",
+                    icon: "floppy.disk",
                     label: "保存 (⌘S)",
                     size: 24,
-                    iconSize: 12,
+                    iconSize: 11,
                     isSelected: true
                 ) {
                     onSave()

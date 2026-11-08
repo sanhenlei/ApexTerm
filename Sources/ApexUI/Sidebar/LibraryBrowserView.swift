@@ -251,7 +251,7 @@ struct LibraryBrowserView: View {
             onOpen: { onOpenFile(file) }
         )
         .draggable(file.url.absoluteString)
-        .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
+        .listRowInsets(EdgeInsets(top: 0, leading: 4, bottom: 0, trailing: 4))
         .contextMenu {
             if isCommand, let onInsert {
                 Button("输入到当前会话") {
