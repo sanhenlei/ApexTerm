@@ -66,7 +66,14 @@ public final class UpdateManager: ObservableObject {
     @Published public var currentStagedAppURL: URL? = nil
     
     public var customCurrentVersion: String? = nil
-    
+
+    /// Local developer builds (version suffix "-local") are managed manually: they must
+    /// never query the upstream release manifest, whose newer version would otherwise
+    /// prompt an in-app install that overwrites local modifications.
+    public var isLocalBuild: Bool {
+        currentVersion.lowercased().contains("-local")
+    }
+
     public var currentVersion: String {
         if let custom = customCurrentVersion {
             return custom
@@ -150,6 +157,11 @@ public final class UpdateManager: ObservableObject {
         let shouldPrompt = promptSheet ?? manual
         guard distributionChannel == .direct else {
             status = .failed("更新由 App Store 管理，请在 App Store 查看。")
+            return
+        }
+        guard !isLocalBuild else {
+            // Local builds never see the update sheet; manual checks report up-to-date.
+            status = .upToDate(currentVersion: currentVersion)
             return
         }
         guard !isChecking else { return }
