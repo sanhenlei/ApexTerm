@@ -551,13 +551,32 @@ public struct WorkspaceView: View {
         CGFloat(min(max(storedEditorSplitRatio, 0.3), 0.85))
     }
 
-    /// Draggable vertical divider between the terminal area and the editor pane,
-    /// mirroring the terminal/SFTP split ratio semantics (terminal keeps `ratio`).
+    /// Draggable vertical divider between the terminal area and the editor pane with a
+    /// visible 1px rule, mirroring the terminal/SFTP split ratio semantics (terminal
+    /// keeps `ratio`). The 8pt frame keeps a comfortable drag target around the line.
     private func editorPaneDivider(in geometry: GeometryProxy) -> some View {
-        ApexSplitDividerHandle(isVertical: true)
+        Rectangle()
+            .fill(ApexStyle.border.opacity(0.6))
+            .frame(width: 1)
+            .frame(width: 8)
+            .contentShape(Rectangle())
+            .onHover { hovering in
+                if hovering {
+                    NSCursor.resizeLeftRight.set()
+                } else {
+                    NSCursor.arrow.set()
+                }
+            }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("终端与编辑器比例")
             .accessibilityValue("\(Int(editorSplitRatio * 100))%")
+            .accessibilityAdjustableAction { direction in
+                switch direction {
+                case .increment: storedEditorSplitRatio = min(0.85, storedEditorSplitRatio + 0.05)
+                case .decrement: storedEditorSplitRatio = max(0.3, storedEditorSplitRatio - 0.05)
+                @unknown default: break
+                }
+            }
             .gesture(
                 DragGesture(minimumDistance: 1)
                     .onChanged { value in

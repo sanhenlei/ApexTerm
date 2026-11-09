@@ -31,6 +31,10 @@
 - `Snippet` 模板解析泛化为 `resolved(command:)` / `extractVariables(in:)` 静态工具，供文件库与旧模型共用。
 
 ### 🐞 问题修复 (Bug Fixes)
+- **修复代码编辑器行号栏右缘出现游离竖线的问题**：
+  - 根因：行号栏基于 NSScrollView 的 NSRulerView 机制，其默认绘制会在行号尺面向内容的一侧画一条 hash-mark 分隔线（正好与行号右缘对齐，并贯穿编辑区高度）；
+  - 修复：`CodeLineRuler` 重写 `draw(_:)` 仅做纯色填充，不再走 NSRulerView 默认分隔线绘制；远程文件编辑弹窗（QuickEditorView）同源修复。
+- **终端与编辑器窗格之间补上可见分割线**：此前分隔条只有悬停才显示把手胶囊，平时两侧区域无视觉边界；现改为常显 1px 边框色竖线 + 8pt 拖拽热区（悬停显示左右调整光标），拖拽调宽行为不变。
 - **修复终端命令自动建议（zsh-autosuggestions 等）与已输入文字同色无法区分的问题**：
   - 根因：8 色 ANSI 主题的补齐逻辑将 bright black（索引 8）直接复制为 normal black（zsh 插件经 `fg=8` → SGR 90/38;5;8 发出的灰色建议文本，渲染走主题调色板），浅色主题下 bright black = color0 = 正文色（`#262626`），建议与输入完全同色；
   - 修复：8 色主题补齐时 bright black 改用中性灰 `#8E8E93`（深浅主题均可读），建议文本恢复灰暗视觉层次；16 色主题不受影响。

@@ -135,6 +135,14 @@ final class CodeLineRuler: NSRulerView {
     }
     required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    /// Replaces NSRulerView's default drawing, which paints a hash-mark separator line
+    /// on the content-facing edge of the gutter (a stray 1px vertical line aligned with
+    /// the line numbers). The gutter is a plain fill; line labels draw separately.
+    override func draw(_ dirtyRect: NSRect) {
+        fillColor.setFill()
+        dirtyRect.fill()
+    }
+
     func reindex() {
         lineStarts = [0]
         guard let editor else { return }
