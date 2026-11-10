@@ -92,22 +92,26 @@ final class SSHTunnelTests: XCTestCase {
         XCTAssertNil(manager.tunnels.first(where: { $0.id == tunnel2.id }))
     }
     
-    // MARK: - TC-TUN-04: Port Conflict Prevention
+    // MARK: - TC-TUN-04: Duplicate Local Ports Allowed Across Configs
+    // Tunnels target different servers and are rarely enabled at the same time, so
+    // config-time port-conflict rejection was removed. A real bind clash surfaces as
+    // a visible tunnel failure at start time instead.
     @MainActor
-    func testTunnelManagerPortConflictPrevention() throws {
+    func testTunnelManagerAllowsDuplicatePortConfigs() throws {
         let manager = SSHTunnelManager(baseDirectory: tempDirectory)
         let sid = UUID()
-        
+
         let t1 = SSHTunnel(name: "Tunnel 1", type: .local, sessionId: sid, bindHost: "127.0.0.1", bindPort: 8080, targetHost: "remote1", targetPort: 80)
         try manager.addTunnel(t1)
-        
+
         let duplicate = SSHTunnel(name: "Tunnel Duplicate", type: .local, sessionId: sid, bindHost: "127.0.0.1", bindPort: 8080, targetHost: "remote2", targetPort: 80)
-        XCTAssertThrowsError(try manager.addTunnel(duplicate)) { error in
-            guard case SSHTunnelError.portConflict(let port) = error else {
-                return XCTFail("Expected portConflict error, got \(error)")
-            }
-            XCTAssertEqual(port, 8080)
-        }
+        try manager.addTunnel(duplicate)
+        XCTAssertEqual(manager.tunnels.count, 2, "same local port on different targets must be accepted")
+
+        var updated = duplicate
+        updated.bindPort = 9090
+        try manager.updateTunnel(updated)
+        XCTAssertEqual(manager.tunnels.first(where: { $0.id == duplicate.id })?.bindPort, 9090)
     }
     
     // MARK: - TC-TUN-05: Command Line Argument Generation

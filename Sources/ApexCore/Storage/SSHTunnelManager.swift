@@ -7,7 +7,6 @@ private func tunnel_proc_listchildpids(_ ppid: pid_t, _ buffer: UnsafeMutableRaw
 
 public enum SSHTunnelError: LocalizedError, Equatable {
     case invalidConfiguration(String)
-    case portConflict(Int)
     case tunnelNotFound
     case processStartFailed(String)
     case sessionHostMissing
@@ -16,8 +15,6 @@ public enum SSHTunnelError: LocalizedError, Equatable {
         switch self {
         case .invalidConfiguration(let reason):
             return "隧道配置无效：\(reason)"
-        case .portConflict(let port):
-            return "本地端口 \(port) 已被其他隧道占用，请更换端口"
         case .tunnelNotFound:
             return "未找到指定的 SSH 端口转发隧道"
         case .processStartFailed(let reason):
@@ -73,42 +70,20 @@ public final class SSHTunnelManager: ObservableObject {
         }
     }
     
-    nonisolated public static func hasPortConflict(_ candidate: SSHTunnel, existing: SSHTunnel) -> Bool {
-        guard candidate.id != existing.id,
-              candidate.bindPort == existing.bindPort,
-              candidate.bindHost == existing.bindHost else {
-            return false
-        }
-        // Remote (-R) tunnels bind on the remote SSH server (scoped by sessionId),
-        // whereas Local (-L) and Dynamic (-D) tunnels bind on the local client machine.
-        let candidateIsRemote = candidate.type == .remote
-        let existingIsRemote = existing.type == .remote
-        guard candidateIsRemote == existingIsRemote else {
-            return false
-        }
-        if candidateIsRemote {
-            return candidate.sessionId == existing.sessionId
-        }
-        return true
-    }
-
     public func addTunnel(_ tunnel: SSHTunnel) throws {
         guard tunnel.isValid else {
             throw SSHTunnelError.invalidConfiguration("端口必须在 1 ~ 65535 范围内且地址不能为空")
         }
-        if tunnels.contains(where: { Self.hasPortConflict(tunnel, existing: $0) }) {
-            throw SSHTunnelError.portConflict(tunnel.bindPort)
-        }
+        // Duplicate local ports across tunnel configs are allowed: tunnels target
+        // different servers and are rarely enabled at the same time. If two same-port
+        // tunnels do run concurrently, ssh fails the second with a visible bind error.
         tunnels.append(tunnel)
         saveTunnels()
     }
-    
+
     public func updateTunnel(_ tunnel: SSHTunnel) throws {
         guard tunnel.isValid else {
             throw SSHTunnelError.invalidConfiguration("端口必须在 1 ~ 65535 范围内且地址不能为空")
-        }
-        if tunnels.contains(where: { Self.hasPortConflict(tunnel, existing: $0) }) {
-            throw SSHTunnelError.portConflict(tunnel.bindPort)
         }
         if let index = tunnels.firstIndex(where: { $0.id == tunnel.id }) {
             tunnels[index] = tunnel
