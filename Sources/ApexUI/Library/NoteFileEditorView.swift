@@ -1,5 +1,4 @@
 import SwiftUI
-import AppKit
 import MarkdownUI
 import ApexCore
 
@@ -18,19 +17,7 @@ struct NoteFileEditorView: View {
     let onClose: () -> Void
 
     @ObservedObject private var themeSettings = AppSettings.shared
-    @State private var showsFindBar = false
     @State private var mode: DisplayMode = .split
-
-    private var editorPalette: NativeCodeEditor.EditorPalette? {
-        guard !themeSettings.followsSystemAppearance else { return nil }
-        return NativeCodeEditor.EditorPalette(
-            background: NSColor(ApexStyle.surface),
-            text: NSColor(ApexStyle.primary),
-            gutter: NSColor(ApexStyle.subtleSurface),
-            gutterText: NSColor(ApexStyle.secondary),
-            selection: NSColor(ApexStyle.selection)
-        )
-    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -142,14 +129,15 @@ struct NoteFileEditorView: View {
         }
     }
 
+    /// Pure-SwiftUI source editor: NSViewRepresentable content does not paint inside
+    /// sheets on current macOS, so the popup uses TextEditor instead.
     private var editor: some View {
-        NativeCodeEditor(
-            text: $tab.content,
-            showsFindBar: $showsFindBar,
-            isReloading: false,
-            palette: editorPalette
-        )
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        TextEditor(text: $tab.content)
+            .font(.system(size: 13, design: .monospaced))
+            .foregroundColor(ApexStyle.primary)
+            .scrollContentBackground(.hidden)
+            .background(ApexStyle.surface)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
