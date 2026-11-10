@@ -37,7 +37,12 @@ public final class SSHTunnelManager: ObservableObject {
     private let baseDirectory: URL
     private var processes: [UUID: Process] = [:]
     private var stderrPipes: [UUID: Pipe] = [:]
-    
+
+    /// Optional provider for the library-workdir mirror of `tunnels.json`. When wired,
+    /// every non-empty save mirrors there (synced-folder / install-proof) and an empty
+    /// primary store recovers from the mirror on next launch.
+    public var workdirTunnelsFileProvider: (() -> URL?)?
+
     public init(baseDirectory: URL? = nil) {
         if let baseDirectory = baseDirectory {
             self.baseDirectory = baseDirectory
@@ -57,16 +62,31 @@ public final class SSHTunnelManager: ObservableObject {
     // MARK: - Persistence & CRUD
     
     public func loadTunnels() {
-        guard let data = try? Data(contentsOf: tunnelsFileURL),
-              let decoded = try? JSONDecoder().decode([SSHTunnel].self, from: data) else {
+        if let data = try? Data(contentsOf: tunnelsFileURL),
+           let decoded = try? JSONDecoder().decode([SSHTunnel].self, from: data),
+           !decoded.isEmpty {
+            self.tunnels = decoded
             return
         }
-        self.tunnels = decoded
+        // Primary store missing/emptied (e.g. after a schema drift or reinstall):
+        // recover from the library-workdir mirror when it holds data.
+        if let workdirURL = workdirTunnelsFileProvider?(),
+           let data = try? Data(contentsOf: workdirURL),
+           let decoded = try? JSONDecoder().decode([SSHTunnel].self, from: data),
+           !decoded.isEmpty {
+            self.tunnels = decoded
+            saveTunnels()
+        }
     }
-    
+
     public func saveTunnels() {
         if let data = try? JSONEncoder().encode(tunnels) {
             try? data.write(to: tunnelsFileURL, options: .atomic)
+            // Mirror only non-empty lists: an empty in-memory list must never wipe
+            // the workdir copy (protects against decode-failure data loss).
+            if !tunnels.isEmpty, let workdirURL = workdirTunnelsFileProvider?() {
+                try? data.write(to: workdirURL, options: .atomic)
+            }
         }
     }
     

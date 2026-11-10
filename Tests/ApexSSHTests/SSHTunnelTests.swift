@@ -113,6 +113,41 @@ final class SSHTunnelTests: XCTestCase {
         try manager.updateTunnel(updated)
         XCTAssertEqual(manager.tunnels.first(where: { $0.id == duplicate.id })?.bindPort, 9090)
     }
+
+    // MARK: - TC-TUN-09: Workdir Mirror & Recovery
+    @MainActor
+    func testWorkdirMirrorSurvivesPrimaryStoreWipe() throws {
+        let primary = tempDirectory.appendingPathComponent("primary", isDirectory: true)
+        let workdir = tempDirectory.appendingPathComponent("workdir", isDirectory: true)
+        try FileManager.default.createDirectory(at: primary, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: workdir, withIntermediateDirectories: true)
+
+        var providerURL: URL?
+        let manager = SSHTunnelManager(baseDirectory: primary)
+        manager.workdirTunnelsFileProvider = { providerURL }
+
+        let tunnel = SSHTunnel(name: "Synced", type: .local, sessionId: UUID(), bindHost: "127.0.0.1", bindPort: 8080, targetHost: "remote", targetPort: 80)
+        providerURL = workdir.appendingPathComponent("tunnels.json")
+        try manager.addTunnel(tunnel)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: providerURL!.path), "non-empty save must mirror into the workdir")
+
+        // Simulate a reinstall wiping the primary store: an empty tunnels.json.
+        try Data("[]".utf8).write(to: primary.appendingPathComponent("tunnels.json"))
+
+        let recovered = SSHTunnelManager(baseDirectory: primary)
+        recovered.workdirTunnelsFileProvider = { providerURL }
+        recovered.loadTunnels() // app wires the provider after init, then reloads
+        XCTAssertEqual(recovered.tunnels.count, 1, "empty primary must recover from the workdir mirror")
+        XCTAssertEqual(recovered.tunnels.first?.name, "Synced")
+        // Recovery also repopulates the primary store.
+        XCTAssertEqual(recovered.tunnels, try JSONDecoder().decode([SSHTunnel].self, from: Data(contentsOf: primary.appendingPathComponent("tunnels.json"))))
+
+        // An intentionally emptied list never wipes the workdir mirror.
+        let emptyManager = SSHTunnelManager(baseDirectory: primary)
+        emptyManager.workdirTunnelsFileProvider = { providerURL }
+        emptyManager.replaceAllTunnels([])
+        XCTAssertEqual(try JSONDecoder().decode([SSHTunnel].self, from: Data(contentsOf: providerURL!)).count, 1, "empty list must not wipe the mirror")
+    }
     
     // MARK: - TC-TUN-05: Command Line Argument Generation
     func testBuildSSHArguments() {

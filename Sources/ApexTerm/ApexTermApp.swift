@@ -99,6 +99,14 @@ struct ApexTermApp: App {
         SessionStore.shared.sessionsMirrorHandler = { data in
             LibraryStore.shared.mirrorSessionsJSON(data)
         }
+        // Tunnels mirror into the same workdir: synced-folder storage survives
+        // reinstalls, and an emptied primary store recovers from the mirror on launch.
+        SSHTunnelManager.shared.workdirTunnelsFileProvider = {
+            LibraryStore.shared.workdirURL?.appendingPathComponent("tunnels.json")
+        }
+        // The provider is wired after the manager's own init load: reload so an emptied
+        // primary store recovers from the workdir mirror on launch.
+        SSHTunnelManager.shared.loadTunnels()
     }
 
     @State private var activeTabs: [TerminalTabItem] = []
