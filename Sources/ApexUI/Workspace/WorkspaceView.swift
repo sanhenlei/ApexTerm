@@ -1761,7 +1761,7 @@ private struct WorkspaceBottomStatusBar: View {
                 
                 Toggle(isOn: $tab.isDirectoryLinkageEnabled) {
                     Label(tab.isDirectoryLinkageEnabled ? L10n.linkageOn : L10n.linkageOff,
-                          systemImage: tab.isDirectoryLinkageEnabled ? "link" : "link.slash")
+                          systemImage: "link")
                 }
                 .toggleStyle(.button)
                 .controlSize(.small)

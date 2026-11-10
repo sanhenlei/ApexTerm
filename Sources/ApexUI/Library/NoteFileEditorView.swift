@@ -59,7 +59,7 @@ struct NoteFileEditorView: View {
 
                 Picker("显示模式", selection: $mode) {
                     Label("编辑", systemImage: "square.and.pencil").tag(DisplayMode.edit)
-                    Label("分栏", systemImage: "columns").tag(DisplayMode.split)
+                    Label("分栏", systemImage: "rectangle.split.2x1").tag(DisplayMode.split)
                     Label("预览", systemImage: "eye").tag(DisplayMode.preview)
                 }
                 .pickerStyle(.segmented)
@@ -67,7 +67,7 @@ struct NoteFileEditorView: View {
                 .frame(width: 150)
 
                 ApexIconButton(
-                    icon: "floppy.disk",
+                    icon: "externaldrive",
                     label: "保存 (⌘S)",
                     size: 24,
                     iconSize: 11,

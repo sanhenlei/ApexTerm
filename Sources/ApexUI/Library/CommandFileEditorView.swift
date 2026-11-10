@@ -75,7 +75,7 @@ struct CommandFileEditorView: View {
                 .disabled(tab.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
                 ApexIconButton(
-                    icon: "floppy.disk",
+                    icon: "externaldrive",
                     label: "保存 (⌘S)",
                     size: 24,
                     iconSize: 11,

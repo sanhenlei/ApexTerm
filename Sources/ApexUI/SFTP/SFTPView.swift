@@ -221,7 +221,7 @@ public struct SFTPView: View {
         HStack(spacing: compact ? 6 : 10) {
             Toggle(isOn: $isLinkageEnabled) {
                 Label(isLinkageEnabled ? L10n.linkageOn : L10n.linkageOff,
-                      systemImage: isLinkageEnabled ? "link" : "link.slash")
+                      systemImage: "link")
             }
             .toggleStyle(.button)
             .controlSize(.small)
