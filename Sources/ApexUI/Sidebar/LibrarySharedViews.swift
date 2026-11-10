@@ -3,9 +3,9 @@ import AppKit
 import ApexCore
 
 /// Shared row for library files: title only, content stays hidden until opened.
-/// Clicking the row opens the editor for both kinds (no accidental terminal input);
-/// command rows additionally show a hover "fill" button that types into the
-/// terminal without executing (⌥-click fills and runs). The hover pencil opens the editor.
+/// Single-click does nothing (prevents accidental opens); DOUBLE-CLICK opens the
+/// editor. Command rows additionally show hover "fill" (types into the terminal
+/// without executing, ⌥-click fills and runs) and "edit" buttons.
 struct LibraryFileRow: View {
     let file: LibraryFile
     let icon: String
@@ -13,72 +13,69 @@ struct LibraryFileRow: View {
     let primaryActionLabel: String
     let showsExecuteHint: Bool
     let showsFillButton: Bool
-    let onPrimary: (_ executeNow: Bool) -> Void
     let onFill: ((_ executeNow: Bool) -> Void)?
     let onOpen: () -> Void
 
     @State private var isHovered = false
 
     var body: some View {
-        Button {
-            onPrimary(NSEvent.modifierFlags.contains(.option))
-        } label: {
-            HStack(spacing: 5) {
-                Image(systemName: icon)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(iconColor)
-                    .frame(width: 13)
+        HStack(spacing: 5) {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(iconColor)
+                .frame(width: 13)
 
-                Text(file.title)
-                    .font(.system(size: 12))
-                    .foregroundColor(ApexStyle.primary)
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 1)
-            .padding(.horizontal, 2)
-            .background(
-                RoundedRectangle(cornerRadius: ApexStyle.badgeRadius)
-                    .fill(isHovered ? ApexStyle.primary.opacity(0.04) : Color.clear)
-            )
-            .contentShape(Rectangle())
-            .overlay(alignment: .trailing) {
-                // Hover actions float above the title so row width never depends on
-                // buttons; the hidden state also stops hit-testing stray clicks.
-                HStack(spacing: 4) {
-                    if showsFillButton {
-                        ApexIconButton(
-                            icon: "terminal",
-                            label: "填入终端",
-                            size: 18,
-                            iconSize: 9,
-                            tint: isHovered ? ApexStyle.success : nil
-                        ) {
-                            onFill?(NSEvent.modifierFlags.contains(.option))
-                        }
-                        .help("填入到终端不执行（⌥+点击填入并立即执行）")
-                    }
-                    ApexIconButton(
-                        icon: "pencil",
-                        label: "编辑 \(file.title)",
-                        size: 18,
-                        iconSize: 8,
-                        tint: isHovered ? ApexStyle.accent : nil
-                    ) {
-                        onOpen()
-                    }
-                }
-                .padding(.horizontal, 3)
-                .background(ApexStyle.surface.opacity(0.92), in: RoundedRectangle(cornerRadius: ApexStyle.badgeRadius))
-                .opacity(isHovered ? 1.0 : 0.0)
-                .allowsHitTesting(isHovered)
-            }
-            .padding(.leading, 2)
+            Text(file.title)
+                .font(.system(size: 12))
+                .foregroundColor(ApexStyle.primary)
+                .lineLimit(1)
         }
-        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 1)
+        .padding(.horizontal, 2)
+        .background(
+            RoundedRectangle(cornerRadius: ApexStyle.badgeRadius)
+                .fill(isHovered ? ApexStyle.primary.opacity(0.04) : Color.clear)
+        )
+        .contentShape(Rectangle())
+        .overlay(alignment: .trailing) {
+            // Hover actions float above the title so row width never depends on
+            // buttons; the hidden state also stops hit-testing stray clicks.
+            HStack(spacing: 4) {
+                if showsFillButton {
+                    ApexIconButton(
+                        icon: "terminal",
+                        label: "填入终端",
+                        size: 18,
+                        iconSize: 9,
+                        tint: isHovered ? ApexStyle.success : nil
+                    ) {
+                        onFill?(NSEvent.modifierFlags.contains(.option))
+                    }
+                    .help("填入到终端不执行（⌥+点击填入并立即执行）")
+                }
+                ApexIconButton(
+                    icon: "pencil",
+                    label: "编辑 \(file.title)",
+                    size: 18,
+                    iconSize: 8,
+                    tint: isHovered ? ApexStyle.accent : nil
+                ) {
+                    onOpen()
+                }
+            }
+            .padding(.horizontal, 3)
+            .background(ApexStyle.surface.opacity(0.92), in: RoundedRectangle(cornerRadius: ApexStyle.badgeRadius))
+            .opacity(isHovered ? 1.0 : 0.0)
+            .allowsHitTesting(isHovered)
+        }
+        .padding(.leading, 2)
+        .onTapGesture(count: 2) {
+            onOpen()
+        }
         .help(showsFillButton
-              ? "点击打开编辑器；悬停终端图标「填入」不执行（⌥+点击立即执行）"
-              : primaryActionLabel)
+              ? "双击打开编辑器；悬停终端图标「填入」不执行（⌥+点击立即执行）"
+              : "双击打开")
         .onHover { hovering in
             withAnimation(ApexStyle.hoverTransition) {
                 isHovered = hovering
