@@ -239,7 +239,9 @@ struct LibraryBrowserView: View {
             showsFillButton: isCommand,
             // Row clicks always open the editor — typing into the terminal happens
             // only via the explicit hover fill button (or ⌥+fill to run immediately).
-            onPrimary: { _ in onOpenFile(file) },
+            onPrimary: { _ in
+                onOpenFile(file)
+            },
             onFill: isCommand ? { executeNow in
                 guard let onInsert else { return }
                 guard let content = try? library.read(file), !content.isEmpty else {

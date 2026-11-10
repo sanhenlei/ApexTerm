@@ -8,6 +8,7 @@ import ApexCore
 struct CommandFileEditorView: View {
     @ObservedObject var tab: EditorTabItem
     let onSave: () -> Void
+    let onClose: () -> Void
     let onInsertCommand: (_ command: String, _ executeNow: Bool) -> Void
 
     @ObservedObject private var themeSettings = AppSettings.shared
@@ -95,7 +96,18 @@ struct CommandFileEditorView: View {
                 ) {
                     onSave()
                 }
+                .keyboardShortcut("s", modifiers: .command)
                 .disabled(!tab.isDirty)
+
+                ApexIconButton(
+                    icon: "xmark",
+                    label: "关闭",
+                    size: 24,
+                    iconSize: 10
+                ) {
+                    onClose()
+                }
+                .help("关闭编辑窗口")
             }
             .padding(.horizontal, ApexStyle.s3)
             .padding(.vertical, ApexStyle.s2)

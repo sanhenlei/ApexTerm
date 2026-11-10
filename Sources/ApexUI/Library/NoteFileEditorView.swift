@@ -15,6 +15,7 @@ struct NoteFileEditorView: View {
 
     @ObservedObject var tab: EditorTabItem
     let onSave: () -> Void
+    let onClose: () -> Void
 
     @ObservedObject private var themeSettings = AppSettings.shared
     @State private var showsFindBar = false
@@ -87,7 +88,18 @@ struct NoteFileEditorView: View {
                 ) {
                     onSave()
                 }
+                .keyboardShortcut("s", modifiers: .command)
                 .disabled(!tab.isDirty)
+
+                ApexIconButton(
+                    icon: "xmark",
+                    label: "关闭",
+                    size: 24,
+                    iconSize: 10
+                ) {
+                    onClose()
+                }
+                .help("关闭编辑窗口")
             }
             .padding(.horizontal, ApexStyle.s3)
             .padding(.vertical, ApexStyle.s2)

@@ -91,7 +91,7 @@ struct ApexTermApp: App {
     @StateObject private var sessionStore = SessionStore.shared
     @ObservedObject private var updateManager = UpdateManager.shared
     @ObservedObject private var settings = AppSettings.shared
-    
+
     @FocusedValue(\.isWorkspaceWindow) private var isWorkspaceWindow
 
     init() {
@@ -104,9 +104,8 @@ struct ApexTermApp: App {
     @State private var activeTabs: [TerminalTabItem] = []
     @State private var selectedTabId: UUID?
     @State private var selectedSidebarSession: Session?
-    @State private var editorTabs: [EditorTabItem] = []
-    @State private var selectedEditorTabId: UUID?
-    @AppStorage("workspace.editorVisible") private var isEditorPaneVisible = false
+    /// The library file (command/note) currently open in the popup editor window.
+    @State private var editingLibraryItem: EditorTabItem?
     
     @State private var isAboutPresented = false
     @State private var isShortcutsPresented = false
@@ -137,9 +136,22 @@ struct ApexTermApp: App {
                     store: sessionStore,
                     activeTabs: $activeTabs,
                     selectedTabId: $selectedTabId,
-                    editorTabs: $editorTabs,
-                    selectedEditorTabId: $selectedEditorTabId
+                    onOpenLibraryFile: { file in
+                        openLibraryFile(file)
+                    }
                 )
+                .sheet(item: $editingLibraryItem) { item in
+                    LibraryEditorSheet(
+                        item: item,
+                        onInsertCommand: { command, executeNow in
+                            insertCommandText(command, executeNow: executeNow)
+                        },
+                        onClose: {
+                            editingLibraryItem = nil
+                        }
+                    )
+                    .interactiveDismissDisabled(item.isDirty)
+                }
             }
             .focusedSceneValue(\.isWorkspaceWindow, true)
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
@@ -499,27 +511,21 @@ struct ApexTermApp: App {
         }
     }
 
-    /// Opens a library file in the editor pane, reusing the tab when already open.
+    /// Opens a library file in the popup editor window. The state mutation is deferred
+    /// out of the sidebar List's NSTableView delegate callback (reentrant-operation guard).
     private func openLibraryFile(_ file: LibraryFile) {
-        if let existing = editorTabs.first(where: { $0.url == file.url }) {
-            selectedEditorTabId = existing.id
-        } else {
+        DispatchQueue.main.async {
             let content = (try? LibraryStore.shared.read(file)) ?? ""
-            let tab = EditorTabItem(
+            self.editingLibraryItem = EditorTabItem(
                 kind: file.kind,
                 url: file.url,
                 title: file.title,
                 group: file.group,
                 content: content
             )
-            editorTabs.append(tab)
-            selectedEditorTabId = tab.id
-        }
-        withAnimation(ApexStyle.hoverTransition) {
-            isEditorPaneVisible = true
         }
     }
-    
+
     private func openLocalTerminal() {
         let local = Session.local()
         let client = SSHClientFactory.makeClient(for: local)

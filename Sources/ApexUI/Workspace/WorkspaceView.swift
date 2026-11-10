@@ -505,11 +505,8 @@ public struct WorkspaceView: View {
     }
     @State private var splitDragStartRatio: CGFloat?
     @AppStorage("workspace.filesVisible") private var isSFTPVisible = false
-    @AppStorage("workspace.editorVisible") private var isEditorPaneVisible = false
-    @AppStorage("workspace.editorSplitRatio") private var storedEditorSplitRatio: Double = 0.64
-    @State private var editorSplitDragStart: CGFloat?
-    @Binding public var editorTabs: [EditorTabItem]
-    @Binding public var selectedEditorTabId: UUID?
+    /// Opens a library file (command/note) in the popup editor window.
+    let onOpenLibraryFile: (LibraryFile) -> Void
     @State private var isQuickCommandBarVisible: Bool = false
     @State private var isCommandPalettePresented: Bool = false
     @State private var isTunnelModalPresented: Bool = false
@@ -533,64 +530,16 @@ public struct WorkspaceView: View {
         store: SessionStore,
         activeTabs: Binding<[TerminalTabItem]>,
         selectedTabId: Binding<UUID?>,
-        editorTabs: Binding<[EditorTabItem]> = .constant([]),
-        selectedEditorTabId: Binding<UUID?> = .constant(nil)
+        onOpenLibraryFile: @escaping (LibraryFile) -> Void = { _ in }
     ) {
         self.store = store
         self._activeTabs = activeTabs
         self._selectedTabId = selectedTabId
-        self._editorTabs = editorTabs
-        self._selectedEditorTabId = selectedEditorTabId
+        self.onOpenLibraryFile = onOpenLibraryFile
     }
 
     private var currentTab: TerminalTabItem? {
         activeTabs.first(where: { $0.id == selectedTabId }) ?? activeTabs.first
-    }
-
-    private var editorSplitRatio: CGFloat {
-        CGFloat(min(max(storedEditorSplitRatio, 0.3), 0.85))
-    }
-
-    /// Draggable vertical divider between the terminal area and the editor pane with a
-    /// visible 1px rule, mirroring the terminal/SFTP split ratio semantics (terminal
-    /// keeps `ratio`). The 8pt frame keeps a comfortable drag target around the line.
-    private func editorPaneDivider(in geometry: GeometryProxy) -> some View {
-        Rectangle()
-            .fill(ApexStyle.border.opacity(0.6))
-            .frame(width: 1)
-            .frame(width: 8)
-            .contentShape(Rectangle())
-            .onHover { hovering in
-                if hovering {
-                    NSCursor.resizeLeftRight.set()
-                } else {
-                    NSCursor.arrow.set()
-                }
-            }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("终端与编辑器比例")
-            .accessibilityValue("\(Int(editorSplitRatio * 100))%")
-            .accessibilityAdjustableAction { direction in
-                switch direction {
-                case .increment: storedEditorSplitRatio = min(0.85, storedEditorSplitRatio + 0.05)
-                case .decrement: storedEditorSplitRatio = max(0.3, storedEditorSplitRatio - 0.05)
-                @unknown default: break
-                }
-            }
-            .gesture(
-                DragGesture(minimumDistance: 1)
-                    .onChanged { value in
-                        let start = editorSplitDragStart ?? editorSplitRatio
-                        if editorSplitDragStart == nil { editorSplitDragStart = start }
-                        let minWidth: CGFloat = 260
-                        guard geometry.size.width > minWidth * 2 else { return }
-                        let newRatio = start + value.translation.width / geometry.size.width
-                        let minRatio = minWidth / geometry.size.width
-                        let maxRatio = 1.0 - minWidth / geometry.size.width
-                        storedEditorSplitRatio = Double(min(max(newRatio, minRatio), maxRatio))
-                    }
-                    .onEnded { _ in editorSplitDragStart = nil }
-            )
     }
     
     /// Hidden zero-size buttons providing the keyboard-shortcut surface. Kept out of
@@ -642,21 +591,12 @@ public struct WorkspaceView: View {
                 .keyboardShortcut("k", modifiers: [.command, .option])
             Button("") { copyLastCommandOutput() }
                 .keyboardShortcut("c", modifiers: [.command, .option])
-            Button("") {
-                withAnimation(ApexStyle.hoverTransition) {
-                    isEditorPaneVisible.toggle()
-                }
-            }
-            .keyboardShortcut("e", modifiers: [.command, .shift])
         }
         .frame(width: 0, height: 0)
         .opacity(0)
     }
 
     public var body: some View {
-        GeometryReader { geometry in
-        HStack(spacing: 0) {
-
         VStack(spacing: 0) {
 
             if !activeTabs.isEmpty {
@@ -768,7 +708,7 @@ public struct WorkspaceView: View {
                             }
                         },
                         onOpenFile: { file in
-                            openEditorTab(file)
+                            onOpenLibraryFile(file)
                         }
                     )
                 }
@@ -845,28 +785,6 @@ public struct WorkspaceView: View {
                 .frame(minHeight: 32)
                 .background(ApexStyle.surface)
             }
-        }
-        .frame(width: isEditorPaneVisible ? max(260, geometry.size.width * editorSplitRatio) : nil)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-        // Right-side editor pane for library files (quick commands + notes)
-        if isEditorPaneVisible {
-            editorPaneDivider(in: geometry)
-
-            EditorPaneView(
-                tabs: $editorTabs,
-                selectedTabId: $selectedEditorTabId,
-                onInsertCommand: { command, executeNow in
-                    guard let tab = currentTab,
-                          let pane = tab.activePane ?? tab.panes.first,
-                          let data = tab.fillInputPayload(command: command, executeNow: executeNow) else { return }
-                    Task { try? await pane.sshClient.sendInput(data) }
-                }
-            )
-            .frame(minWidth: 260, maxHeight: .infinity)
-        }
-
-        }
         }
         .navigationTitle(currentTab?.displayTitle ?? L10n.appName)
         .navigationSubtitle(currentTab.map { tab in
@@ -1190,27 +1108,6 @@ public struct WorkspaceView: View {
         newTab.connect()
     }
     
-    /// Opens a library file in the editor pane, reusing an existing tab for the same file.
-    private func openEditorTab(_ file: LibraryFile) {
-        if let existing = editorTabs.first(where: { $0.url == file.url }) {
-            selectedEditorTabId = existing.id
-        } else {
-            let content = (try? LibraryStore.shared.read(file)) ?? ""
-            let editorTab = EditorTabItem(
-                kind: file.kind,
-                url: file.url,
-                title: file.title,
-                group: file.group,
-                content: content
-            )
-            editorTabs.append(editorTab)
-            selectedEditorTabId = editorTab.id
-        }
-        withAnimation(ApexStyle.hoverTransition) {
-            isEditorPaneVisible = true
-        }
-    }
-
     private func closeTab(_ tab: TerminalTabItem) {
         tab.tearDown()
         activeTabs.removeAll(where: { $0.id == tab.id })
