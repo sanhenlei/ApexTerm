@@ -127,6 +127,12 @@ public final class LocalTerminalSession: SSHSessionProtocol, @unchecked Sendable
             envVars["USER"] = currentUser
             envVars["LOGNAME"] = currentUser
         }
+        // zsh-autosuggestions reads this before zshrc runs: skip any suggestion whose
+        // command contains a newline — inline multi-line suggestions wrap the prompt
+        // onto extra lines and strand typed input there. The plugin treats the value
+        // as an exclusion GLOB (pattern~ignore), so use glob syntax with a literal
+        // newline character.
+        envVars["ZSH_AUTOSUGGEST_HISTORY_IGNORE"] = "*\n*"
         for (key, value) in session.environmentVariables where SessionStartupHelper.isValidEnvKey(key) {
             envVars[key] = value
         }

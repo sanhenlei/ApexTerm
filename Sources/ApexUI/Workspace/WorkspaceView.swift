@@ -921,6 +921,7 @@ public struct WorkspaceView: View {
     
     @ToolbarContentBuilder
     private var workspaceToolbar: some ToolbarContent {
+        // Session-bound items (need an active tab / pane)
         if let tab = currentTab {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button(action: { duplicateTab(tab) }) {
@@ -935,21 +936,6 @@ public struct WorkspaceView: View {
                 }
                 .disabled(tab.panes.count >= 2)
                 .help("分屏 (⌘D / ⌘⇧D)")
-                
-                Button(action: { isTunnelModalPresented = true }) {
-                    Label("端口转发", systemImage: "arrow.triangle.swap")
-                }
-                .help("SSH 端口转发与隧道管理 (⌘⌥T)")
-                
-                Button(action: { isCommandPalettePresented = true }) {
-                    Label("命令面板", systemImage: "command")
-                }
-                .help("全局快速搜索与命令面板 (⌘P)")
-                
-                Button(action: { isProcessInspectorPresented = true }) {
-                    Label("进程监视", systemImage: "list.bullet.rectangle.portrait")
-                }
-                .help("Linux/macOS 远程进程与服务监视控制中心 (⌘⌥K)")
             }
             ToolbarItem(placement: .primaryAction) {
                 if let primaryPane = tab.panes.first {
@@ -958,19 +944,35 @@ public struct WorkspaceView: View {
                                          onToggleMonitoring: { tab.setMonitoringEnabled($0) })
                 }
             }
-            ToolbarItemGroup(placement: .primaryAction) {
-                Toggle(isOn: $isQuickCommandBarVisible) {
-                    Label("快捷命令", systemImage: isQuickCommandBarVisible ? "bolt.fill" : "bolt")
-                }
-                .toggleStyle(.button)
-                .help(isQuickCommandBarVisible ? "隐藏底部快捷命令栏 (⌘⇧B)" : "显示底部快捷命令栏 (⌘⇧B)")
-
-                Toggle(isOn: $isSFTPVisible) {
-                    Label("文件面板", systemImage: isSFTPVisible ? "folder.fill" : "folder")
-                }
-                .toggleStyle(.button)
-                .help(isSFTPVisible ? "隐藏文件面板" : "显示文件面板")
+        }
+        // Always-available utilities: visible at launch without any connected session
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button(action: { isTunnelModalPresented = true }) {
+                Label("端口转发", systemImage: "arrow.triangle.swap")
             }
+            .help("SSH 端口转发与隧道管理 (⌘⌥T)")
+
+            Button(action: { isCommandPalettePresented = true }) {
+                Label("命令面板", systemImage: "command")
+            }
+            .help("全局快速搜索与命令面板 (⌘P)")
+
+            Button(action: { isProcessInspectorPresented = true }) {
+                Label("进程监视", systemImage: "list.bullet.rectangle.portrait")
+            }
+            .help("Linux/macOS 远程进程与服务监视控制中心 (⌘⌥K)")
+
+            Toggle(isOn: $isQuickCommandBarVisible) {
+                Label("快捷命令", systemImage: isQuickCommandBarVisible ? "bolt.fill" : "bolt")
+            }
+            .toggleStyle(.button)
+            .help(isQuickCommandBarVisible ? "隐藏底部快捷命令栏 (⌘⇧B)" : "显示底部快捷命令栏 (⌘⇧B)")
+
+            Toggle(isOn: $isSFTPVisible) {
+                Label("文件面板", systemImage: isSFTPVisible ? "folder.fill" : "folder")
+            }
+            .toggleStyle(.button)
+            .help(isSFTPVisible ? "隐藏文件面板" : "显示文件面板")
         }
     }
 
