@@ -1065,8 +1065,11 @@ final class CodeReviewRegressionTests: XCTestCase {
         XCTAssertNoThrow(try manager.addTunnel(remote8080A))
         // Remote 8080 on Session B binds on a different remote server and must not conflict with Session A
         XCTAssertNoThrow(try manager.addTunnel(remote8080B))
-        // Duplicate Remote 8080 on the SAME Session A must conflict
-        XCTAssertThrowsError(try manager.addTunnel(remote8080ADup))
+        // TC-TUN-04 new semantics: config-time port-conflict interception was removed
+        // entirely — duplicates (even on the same session) are allowed and the real
+        // occupancy is surfaced by OpenSSH bind failure at runtime.
+        XCTAssertNoThrow(try manager.addTunnel(remote8080ADup))
+        XCTAssertEqual(manager.tunnels.filter { $0.bindPort == 8080 }.count, 4)
     }
 
     // MARK: - TC-REV-45: SSHConfigHost.mergedSession preserves existing user customizations on re-import
