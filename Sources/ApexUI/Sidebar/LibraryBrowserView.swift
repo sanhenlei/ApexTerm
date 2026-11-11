@@ -234,8 +234,6 @@ struct LibraryBrowserView: View {
             file: file,
             icon: isCommand ? "terminal.fill" : "doc.text.fill",
             iconColor: isCommand ? ApexStyle.accent : ApexStyle.secondary,
-            primaryActionLabel: isCommand ? "双击打开命令文件" : "双击打开笔记",
-            showsExecuteHint: isCommand,
             showsFillButton: isCommand,
             onFill: isCommand ? { executeNow in
                 guard let onInsert else { return }

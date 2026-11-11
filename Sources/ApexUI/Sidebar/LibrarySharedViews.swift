@@ -4,14 +4,13 @@ import ApexCore
 
 /// Shared row for library files: title only, content stays hidden until opened.
 /// Single-click does nothing (prevents accidental opens); DOUBLE-CLICK opens the
-/// editor. Command rows additionally show hover "fill" (types into the terminal
-/// without executing, ⌥-click fills and runs) and "edit" buttons.
+/// editor. Command rows additionally show a hover "fill" button (types into the
+/// terminal without executing; ⌥-click fills and runs). Editing is double-click
+/// only, so there is deliberately no pencil button.
 struct LibraryFileRow: View {
     let file: LibraryFile
     let icon: String
     let iconColor: Color
-    let primaryActionLabel: String
-    let showsExecuteHint: Bool
     let showsFillButton: Bool
     let onFill: ((_ executeNow: Bool) -> Void)?
     let onOpen: () -> Void
@@ -39,35 +38,24 @@ struct LibraryFileRow: View {
         )
         .contentShape(Rectangle())
         .overlay(alignment: .trailing) {
-            // Hover actions float above the title so row width never depends on
-            // buttons; the hidden state also stops hit-testing stray clicks.
-            HStack(spacing: 4) {
-                if showsFillButton {
-                    ApexIconButton(
-                        icon: "terminal",
-                        label: "填入终端",
-                        size: 18,
-                        iconSize: 9,
-                        tint: isHovered ? ApexStyle.success : nil
-                    ) {
-                        onFill?(NSEvent.modifierFlags.contains(.option))
-                    }
-                    .help("填入到终端不执行（⌥+点击填入并立即执行）")
-                }
+            // Hover fill button floats above the title so row width never depends
+            // on buttons; the hidden state also stops hit-testing stray clicks.
+            if showsFillButton {
                 ApexIconButton(
-                    icon: "pencil",
-                    label: "编辑 \(file.title)",
+                    icon: "terminal",
+                    label: "填入终端",
                     size: 18,
-                    iconSize: 8,
-                    tint: isHovered ? ApexStyle.accent : nil
+                    iconSize: 9,
+                    tint: isHovered ? ApexStyle.success : nil
                 ) {
-                    onOpen()
+                    onFill?(NSEvent.modifierFlags.contains(.option))
                 }
+                .help("填入到终端不执行（⌥+点击填入并立即执行）")
+                .padding(.horizontal, 3)
+                .background(ApexStyle.surface.opacity(0.92), in: RoundedRectangle(cornerRadius: ApexStyle.badgeRadius))
+                .opacity(isHovered ? 1.0 : 0.0)
+                .allowsHitTesting(isHovered)
             }
-            .padding(.horizontal, 3)
-            .background(ApexStyle.surface.opacity(0.92), in: RoundedRectangle(cornerRadius: ApexStyle.badgeRadius))
-            .opacity(isHovered ? 1.0 : 0.0)
-            .allowsHitTesting(isHovered)
         }
         .padding(.leading, 2)
         .onTapGesture(count: 2) {
