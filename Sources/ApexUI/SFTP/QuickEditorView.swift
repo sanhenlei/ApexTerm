@@ -4,7 +4,6 @@ import ApexSSH
 
 /// Native remote-file editor with undo, search, synchronized line numbers and safe asynchronous save.
 public struct QuickEditorView: View {
-    @ObservedObject private var themeSettings = AppSettings.shared
     public let item: SFTPItem
     @Binding public var content: String
     public let onSave: (String) async throws -> Void
@@ -15,8 +14,7 @@ public struct QuickEditorView: View {
     @State private var isReloading = false
     @State private var saveNotice: String?
     @State private var saveNoticeIsError = false
-    @State private var isSearchVisible = false
-        @State private var hasUnsavedChanges = false
+    @State private var hasUnsavedChanges = false
     @State private var initialContent = ""
     @State private var pendingDiscard: DiscardAction?
 
@@ -39,18 +37,6 @@ public struct QuickEditorView: View {
     
     @State private var lineCount = 1
     @State private var contentByteCount = 0
-
-    /// The editing area follows the active theme like the header and footer around it.
-    private var editorPalette: NativeCodeEditor.EditorPalette? {
-        guard !themeSettings.followsSystemAppearance else { return nil }
-        return NativeCodeEditor.EditorPalette(
-            background: NSColor(ApexStyle.surface),
-            text: NSColor(ApexStyle.primary),
-            gutter: NSColor(ApexStyle.subtleSurface),
-            gutterText: NSColor(ApexStyle.secondary),
-            selection: NSColor(ApexStyle.selection)
-        )
-    }
 
     public var body: some View {
         VStack(spacing: 0) {
@@ -98,19 +84,7 @@ public struct QuickEditorView: View {
                 }
                 
                 Divider().frame(height: 18)
-                
-                // Search toggle
-                ApexIconButton(
-                    icon: "magnifyingglass",
-                    label: "查找 (⌘F)",
-                    size: 24,
-                    iconSize: 11,
-                    isSelected: isSearchVisible
-                ) {
-                    withAnimation { isSearchVisible.toggle() }
-                }
-                .keyboardShortcut("f", modifiers: .command)
-                
+
                 // Reload button
                 if isReloading {
                     ProgressView()
@@ -146,7 +120,15 @@ public struct QuickEditorView: View {
             
             Divider()
             
-            NativeCodeEditor(text: $content, showsFindBar: $isSearchVisible, isReloading: isReloading, palette: editorPalette)
+            // Pure-SwiftUI editor: NSViewRepresentable content (AppKit scroll/text
+            // views) does not paint inside sheets on current macOS, so the popup
+            // uses the stock TextEditor; undo/IME still come from the platform.
+            TextEditor(text: $content)
+                .font(.system(size: 13, design: .monospaced))
+                .foregroundColor(ApexStyle.primary)
+                .scrollContentBackground(.hidden)
+                .background(ApexStyle.surface)
+                .disabled(isReloading)
                 .onChange(of: content) { _, newValue in
                     hasUnsavedChanges = newValue != initialContent
                     lineCount = 1 + newValue.utf8.reduce(0) { $0 + ($1 == 10 ? 1 : 0) }
