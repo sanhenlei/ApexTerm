@@ -24,6 +24,14 @@ public struct TerminalCell: Equatable, Sendable {
 }
 
 /// High-performance circular line buffer for terminal scrollback history with real-time update notifications
+/// Scroll anchoring that survives NSView rebuilds: switching tabs/panes rebuilds the
+/// terminal view (SwiftUI `.id`), so the user's position is stashed on the buffer.
+public final class TerminalScrollAnchor: @unchecked Sendable {
+    public var isPinnedToBottom = true
+    public var offset: CGFloat = 0
+    public init() {}
+}
+
 public final class TerminalRingBuffer: @unchecked Sendable {
     private var historyLimit: Int
     public var maxLines: Int { lock.withLock { historyLimit } }
@@ -51,6 +59,7 @@ public final class TerminalRingBuffer: @unchecked Sendable {
     private var pendingSequence: String = ""
     private let vtParser = VTParser()
     public let shellIntegration = ShellIntegrationTracker()
+    public let scrollAnchor = TerminalScrollAnchor()
     private var screen: [[TerminalCell]]? = nil
     private var screenRows = 35
     private var screenColumns = 120

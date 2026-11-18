@@ -26,7 +26,7 @@ jobs:
 
       - name: Assemble app bundle
         run: |
-          VERSION="1.23.3-local"
+          VERSION="1.23.6-local"
           BUILD_NUMBER="$(date +%Y%m%d)01"
           APP_DIR=".build/AetherTerm.app"
           MACOS_DIR="${APP_DIR}/Contents/MacOS"
@@ -103,22 +103,9 @@ jobs:
           zip -qry AetherTerm-local-macos-arm64.zip AetherTerm.app
           shasum -a 256 AetherTerm-local-macos-arm64.zip
 
-      - name: Create drag-install DMG
-        run: |
-          STAGING=$(mktemp -d /tmp/aetherterm_dmg.XXXXXX)
-          cp -R .build/AetherTerm.app "${STAGING}/"
-          ln -s /Applications "${STAGING}/Applications"
-          hdiutil create -volname "AetherTerm" -fs HFS+ \
-            -srcfolder "${STAGING}" -ov -format UDZO \
-            .build/AetherTerm-1.18.0-local-macos-arm64.dmg -quiet
-          rm -rf "${STAGING}"
-          shasum -a 256 .build/AetherTerm-1.18.0-local-macos-arm64.dmg
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: AetherTerm-local-macos-arm64
-          path: |
-            .build/AetherTerm-local-macos-arm64.zip
-            .build/AetherTerm-1.18.0-local-macos-arm64.dmg
+          path: .build/AetherTerm-local-macos-arm64.zip
           retention-days: 7

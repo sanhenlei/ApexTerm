@@ -54,6 +54,50 @@
 - 更新 `TitlebarZoomAndUIRegressionTests` 快捷命令栏布局回归至新构造接口；
 - AppStore 沙盒渠道下工作目录访问全程经 `FileAccessStore` 安全作用域书签与租约。
 
+## [v1.23.6] - 2026-11-10
+
+### 🐞 问题修复与双向拖拽增强 (Bug Fixes & Improvements)
+- **重构从服务器拖拽文件/目录到本机任意目录的原生 AppKit 文件承诺链路 (`SFTPOutlineViewDragDropBridge` & `SFTPFilePromiseProvider`)**：
+  - **根因定位**：
+    1. 此前依赖 SwiftUI `TableRow.itemProvider` 经由 `SwiftUI.PasteboardWriter.make(from:)` 桥接时，同时注册 `public.data` 与具体文件扩展名 `UTType` 会使 SwiftUI 自动附加 `alternateProviders` 剪贴板风味，干扰 Finder 的 `NSFilePromiseReceiver` 识别；
+    2. 同时 `SFTPView` 外层 `ZStack` 的 `.onDrop(of: [.fileURL])` 在从表格向外拖拽文件时会高频轮询 `Apple CFPasteboard drag`，并与内部 `NSOutlineView` 抢占拖拽焦点；
+  - **修复方案**：新增原生 AppKit `SFTPOutlineViewDragDropBridge` 与 `SFTPOutlineDataSourceProxy`，直接接管 `NSOutlineView` 的 `outlineView(_:pasteboardWriterForItem:)` 并返回纯净的 `SFTPFilePromiseProvider`（`NSFilePromiseProvider`），当用户将服务器文件或文件夹拖入本机 Finder、桌面或任意子目录时，由 `SFTPFilePromiseDelegate.filePromiseProvider(_:writePromiseTo:completionHandler:)` 直接接收用户选择的目标目录真实路径，完成下载、原子落盘校验并在 `TransferManager` 中记录真实本机目标路径（点击「在 Finder 中显示」可直接定位至目标目录文件）。
+- **全面修复从宿主机拖拽文件/文件夹到终端服务器与 SFTP 面板上传 (`NativeTerminalView` & `SFTPOutlineDataSourceProxy` & `NativeSSHSession`)**：
+  - **修复终端视图拒绝 Finder 拖拽 (`NativeTerminalView` & `NativeTerminalScrollView`)**：`NativeTerminalView` 继承自非可编辑 `NSTextView`（`isEditable = false`），此前仅重写了 `draggingEntered` 与 `performDragOperation` 而未重写 `draggingUpdated` 与 `prepareForDragOperation`，导致鼠标在终端内移动 1 像素即触发父类 `NSTextView.draggingUpdated` 返回 `[]`（拒绝拖放），且未覆盖空白滚动区域。现已在 `NativeTerminalView` 与 `NativeTerminalScrollView` 完整实现 `draggingEntered` / `draggingUpdated` / `draggingExited` / `prepareForDragOperation` / `performDragOperation` / `concludeDragOperation`，支持拖入任意数量文件与文件夹，并在拖入时显示高亮边框与顶部实时上传状态胶囊提示，底部状态栏传输指示器支持点击直接展开「传输记录」抽屉；
+  - **修复 SFTP 表格区域拖入上传拦截 (`SFTPOutlineDataSourceProxy`)**：在 `NSOutlineView` 数据源代理中实现 `outlineView(_:validateDrop:proposedItem:proposedChildIndex:)` 与 `outlineView(_:acceptDrop:item:childIndex:)`，自动过滤表格自身发起的向外导出拖拽，同时在任意表格行或空白区域接收宿主机拖入的文件与目录并上传至当前远程目录；
+  - **修复终端初始目录 `~` 下 SCP 上传/下载路径展开 (`NativeSSHSession.expandTildeForSCP`)**：当用户尚未打开 SFTP 侧边栏、终端当前远程目录仍为默认 `"~"` 时直接向终端拖入文件上传，自动将 `~` / `~/` 展开为远端真实主目录路径（或相对主目录路径），避免现代 OpenSSH `scp`（SFTP 模式）报错 `No such file or directory`。
+
+### 🧪 质量门禁与性能对比 (Verification & Benchmarks)
+- 新增 `CodeReviewRegressionTests` `TC-REV-64`，完整覆盖：
+  1. 服务器 `SFTPFilePromiseProvider` 拖拽导出至本机任意嵌套目录的落盘校验与 `TransferManager` 真实目标路径记录；
+  2. 宿主机文件拖入非可编辑 `NativeTerminalView` / `NativeTerminalScrollView` 的完整 `draggingEntered` -> `draggingUpdated` -> `prepareForDragOperation` -> `performDragOperation` 生命周期；
+  3. 宿主机文件拖入 `SFTPView` `NSOutlineView` 的 `validateDrop` / `acceptDrop` 上传与内部向外拖拽防自拦截；
+  4. `NativeSSHSession.expandTildeForSCP` 远端主目录 `~` 路径展开断言；
+- 全量自动化测试用例 100% 绿色通过（0 failures），Swift 6 模式零警告。
+
+## [v1.23.5] - 2026-11-10
+
+### 🐞 问题修复 (Bug Fixes)
+- **修复从 SFTP 文件浏览器拖拽文件到 Finder/桌面时传输记录显示成功但本地未生成文件的问题 (`SFTPDragExportHelper.makeItemProvider`)**：
+  - **根因定位**：此前 `makeItemProvider` 对文件同时注册了 `UTType.fileURL.identifier`（`public.file-url`）的 `registerFileRepresentation`。在 macOS `CFPasteboard` 与 `SwiftUI.PasteboardDataProvider` 拖拽启动阶段，系统要求立即为 `public.file-url` 生成沙盒扩展（`Sandbox extension data required immediately for flavor public.file-url`），并在鼠标尚未松开时提前触发 `NSItemProvider.loadURLSynchronously(for: .fileURL)` 下载文件至临时目录（使传输中心状态提前变为「传输完成」），随后调用 `NSURL.object(withItemProviderData:typeIdentifier: "public.file-url")` 将文件正文（如 Markdown / YAML 内容）当作 URL 字节解析失败（返回空 `Data`），导致松开鼠标落盘至 Finder 时因 `public.file-url` 沙盒校验失败（`sandbox_extension_consume failed: 1`）而静默丢弃，不会触发 `NSFilePromiseProvider` 落盘；
+  - **修复方案**：移除错误的 `UTType.fileURL` 文件表示注册，统一通过标准 `NSFilePromiseProvider` 文件承诺通道（普通文件优先注册 `UTType.data.identifier` 并附带具体 `UTType`，目录注册 `UTType.folder.identifier`）按需在用户在目标文件夹松开鼠标时执行下载与落盘；
+  - **修复拖拽导出文件名重复追加后缀与落盘校验**：保留完整 `provider.suggestedName = item.name` 并以 `UTType.data` 作为主承诺类型，解决 `.yml`、`.log`、`.sh` 等文件经 `FilePromiseProvider` 导出时被重复追加扩展名（如 `docker-compose.yml.yml`）的问题；同时在调用 `completeExternalTransfer` 标记传输成功前强制校验本地文件存在性。
+
+### 🧪 质量门禁与性能对比 (Verification & Benchmarks)
+- 更新 `DragAndDropTransferTests`、`ComprehensiveFeatureTests`、`VMIntegrationTests`，并新增 `CodeReviewRegressionTests` `TC-REV-63`（模拟 `SwiftUI` `NSFilePromiseProvider` 真实落盘链路并验证 `.md` / `.yml` / `.log` / `.sh` 原名无损落盘与目录打包导出）；
+- 全量自动化测试用例 100% 绿色通过（0 failures），Swift 6 模式零警告。
+
+## [v1.23.4] - 2026-11-10
+
+### ⚡️ 体验优化 (Improvements)
+- **复制用户名密码与复制会话信息统一为单行紧凑格式 (`SessionCopyHelper`)**：
+  - 将「复制用户名密码」(`formatUserAndPassword`) 调整为单行格式：`用户名: <user> 密码: <password>`；
+  - 将「复制会话信息」(`formatSessionInfo`) 调整为单行格式：`会话: <name> 主机: <host> 端口: <port> 用户名: <user> 密码: <password>`（当会话名与主机相同时自动省略重复会话字段），方便在 IM、工单或文档中单行粘贴分享，避免多行换行。
+
+### 🧪 质量门禁与性能对比 (Verification & Benchmarks)
+- 更新 `SessionCopyHelperTests` 并新增 `CodeReviewRegressionTests` `TC-REV-62`，断言单行复制输出零换行符且字段对齐；
+- 全量自动化测试用例 100% 绿色通过（0 failures），Swift 6 模式零警告。
+
 ## [v1.23.3] - 2026-11-08
 
 ### ⚡️ 体验优化 (Improvements)

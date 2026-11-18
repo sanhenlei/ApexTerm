@@ -44,6 +44,9 @@ public struct TerminalRepresentable: NSViewRepresentable {
         scrollView.terminalView.onResize = onResize
         scrollView.terminalView.onFileDrop = onFileDrop
         scrollView.terminalView.onFocus = onFocus
+        // Restore the user's scroll anchoring before rehydration so refresh()
+        // does not jump to the bottom while rebuilding content.
+        scrollView.terminalView.isPinnedToBottom = ringBuffer.scrollAnchor.isPinnedToBottom
         context.coordinator.scrollView = scrollView
         context.coordinator.wasFocused = isFocused
         
@@ -66,7 +69,7 @@ public struct TerminalRepresentable: NSViewRepresentable {
             }
             scrollView.terminalView.notifyDimensionsChangedIfNeeded(immediate: true)
             if scrollView.terminalView.ringBuffer?.isInAlternateScreen != true {
-                scrollView.terminalView.scrollToBottom(forceLayout: true)
+                scrollView.terminalView.restoreScrollAnchorOnRebuild()
             }
         }
         
@@ -443,6 +446,7 @@ public final class NativeTerminalScrollView: NSScrollView {
         NotificationCenter.default.addObserver(self, selector: #selector(handleTriggerFindNotification), name: NSNotification.Name("TriggerTerminalFind"), object: nil)
         
         // Register for file drop
+        self.unregisterDraggedTypes()
         self.registerForDraggedTypes([.fileURL])
     }
     
@@ -521,23 +525,33 @@ public final class NativeTerminalScrollView: NSScrollView {
         super.mouseDown(with: event)
     }
     
+    public func setDropTargetHighlight(_ highlighted: Bool) {
+        self.layer?.borderWidth = highlighted ? 2.0 : 0.0
+        self.layer?.borderColor = highlighted ? NSColor.controlAccentColor.cgColor : nil
+    }
+    
     override public func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        if sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: nil) {
-            return .copy
-        }
-        return []
+        terminalView.draggingEntered(sender)
+    }
+    
+    override public func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        terminalView.draggingUpdated(sender)
+    }
+    
+    override public func draggingExited(_ sender: NSDraggingInfo?) {
+        terminalView.draggingExited(sender)
+    }
+    
+    override public func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        terminalView.prepareForDragOperation(sender)
     }
     
     override public func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
-              !urls.isEmpty else { return false }
-        if let dropHandler = terminalView.onFileDrop {
-            for url in urls {
-                dropHandler(url)
-            }
-            return true
-        }
-        return false
+        terminalView.performDragOperation(sender)
+    }
+    
+    override public func concludeDragOperation(_ sender: NSDraggingInfo?) {
+        terminalView.concludeDragOperation(sender)
     }
     
     required init?(coder: NSCoder) {
@@ -777,26 +791,117 @@ public final class NativeTerminalView: NSTextView {
             } else {
                 isPinnedToBottom = false
             }
+            if let anchor = ringBuffer?.scrollAnchor {
+                anchor.isPinnedToBottom = isPinnedToBottom
+                anchor.offset = clipView.bounds.origin.y
+            }
+        }
+    }
+
+    /// Set after a rebuild (tab switch recreates the view via `.id`) to re-apply the
+    /// anchor saved on the ring buffer. Deferred until layout gives real geometry.
+    private var pendingScrollRestore = false
+
+    public func restoreScrollAnchorOnRebuild() {
+        pendingScrollRestore = true
+        DispatchQueue.main.async { [weak self] in
+            self?.applyPendingScrollRestore()
+        }
+    }
+
+    override public func layout() {
+        super.layout()
+        applyPendingScrollRestore()
+    }
+
+    private func applyPendingScrollRestore() {
+        guard pendingScrollRestore else { return }
+        guard ringBuffer?.isInAlternateScreen != true else {
+            pendingScrollRestore = false
+            return
+        }
+        guard let clipView = enclosingScrollView?.contentView,
+              clipView.bounds.height > 0, frame.height > 0 else { return }
+        pendingScrollRestore = false
+        if isPinnedToBottom {
+            scrollToBottom(forceLayout: true)
+        } else if let anchor = ringBuffer?.scrollAnchor {
+            let maxY = max(0, frame.height - clipView.bounds.height)
+            let target = NSPoint(x: 0, y: min(max(0, anchor.offset), maxY))
+            if abs(clipView.bounds.origin.y - target.y) > 0.5 {
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                clipView.scroll(to: target)
+                enclosingScrollView?.reflectScrolledClipView(clipView)
+                CATransaction.commit()
+            }
+            isPinnedToBottom = false
         }
     }
     
-    override public func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        if sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: nil) {
-            return .copy
+    public private(set) var isFileDropTargeted: Bool = false {
+        didSet {
+            (enclosingScrollView as? NativeTerminalScrollView)?.setDropTargetHighlight(isFileDropTargeted)
         }
-        return []
+    }
+
+    private func canAcceptFileDrop(_ sender: NSDraggingInfo) -> Bool {
+        guard onFileDrop != nil else { return false }
+        // Do not intercept an outgoing SFTP file-promise drag initiated from inside the same window
+        if let sourceView = sender.draggingSource as? NSView, let window = self.window, sourceView.window === window {
+            return false
+        }
+        return sender.draggingPasteboard.canReadObject(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        )
+    }
+
+    override public func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard canAcceptFileDrop(sender) else {
+            isFileDropTargeted = false
+            return []
+        }
+        isFileDropTargeted = true
+        return .copy
+    }
+    
+    override public func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard canAcceptFileDrop(sender) else {
+            isFileDropTargeted = false
+            return []
+        }
+        isFileDropTargeted = true
+        return .copy
+    }
+    
+    override public func draggingExited(_ sender: NSDraggingInfo?) {
+        isFileDropTargeted = false
+    }
+    
+    override public func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        canAcceptFileDrop(sender)
     }
     
     override public func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
-              !urls.isEmpty else { return false }
-        if let dropHandler = onFileDrop {
-            for url in urls {
-                dropHandler(url)
-            }
-            return true
+        isFileDropTargeted = false
+        guard canAcceptFileDrop(sender),
+              let urls = sender.draggingPasteboard.readObjects(
+                  forClasses: [NSURL.self],
+                  options: [.urlReadingFileURLsOnly: true]
+              ) as? [URL],
+              !urls.isEmpty,
+              let dropHandler = onFileDrop else {
+            return false
         }
-        return false
+        for url in urls {
+            dropHandler(url)
+        }
+        return true
+    }
+    
+    override public func concludeDragOperation(_ sender: NSDraggingInfo?) {
+        isFileDropTargeted = false
     }
     
     /// Coalesced refresh on the main thread for high-framerate batching (thread-safe, nonisolated)
@@ -866,6 +971,7 @@ public final class NativeTerminalView: NSTextView {
         self.wantsLayer = true
         self.layerContentsRedrawPolicy = .onSetNeedsDisplay
         
+        self.unregisterDraggedTypes()
         self.registerForDraggedTypes([.fileURL])
         
         settingsObserver = NotificationCenter.default.addObserver(forName: AppSettings.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
