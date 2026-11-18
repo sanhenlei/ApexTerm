@@ -27,13 +27,21 @@ done
 VERSION="${VERSION:-1.23.6}"
 BUILD_NUMBER="$(date +%Y%m%d)01"
 
-# SwiftUIMacros 插件只随完整 Xcode 分发；CLT 工具链编不了 ApexUI。
+# 工具链探测（按顺序兜底）：
+# 1) 环境变量 DEVELOPER_DIR（完整 Xcode，最干净）
+# 2) /Applications/Xcode.app 或 ~/Downloads/Xcode.app
+# 3) 仅装 CLT 的机器：27.x SDK 把 SwiftUI @State 宏化（SwiftUIMacros 插件只随
+#    完整 Xcode 分发），回退到 MacOSX26.5.sdk（仍是经典属性包装器）即可编译。
 if [ -z "${DEVELOPER_DIR:-}" ]; then
     if [ -d "/Applications/Xcode.app/Contents/Developer" ]; then
         export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
     elif [ -d "$HOME/Downloads/Xcode.app/Contents/Developer" ]; then
         export DEVELOPER_DIR="$HOME/Downloads/Xcode.app/Contents/Developer"
     fi
+fi
+if [ -z "${DEVELOPER_DIR:-}" ] && [ -d "/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk" ]; then
+    echo "ℹ️  未检测到完整 Xcode，使用 CLT + MacOSX26.5.sdk 编译（绕过 27.x SDK 的 SwiftUIMacros 依赖）"
+    export SDKROOT="/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk"
 fi
 
 APP_NAME="AetherTerm.app"

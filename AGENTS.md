@@ -250,8 +250,9 @@ swift test
    - 单文件改动：约 30 秒（Release WMO 整模块重编，ApexUI 为最大模块约 24s）；
    - **严禁在本地打包前后清理 `.build` 缓存**，否则退化为 60-90 秒全量冷构建。
 5. **工具链要求（macOS 27+ 环境坑）**：
-   - SwiftUI 宏插件（`SwiftUIMacros`）只随完整版 Xcode 分发；仅装 Command Line Tools 的机器编译 ApexUI 会报 `external macro implementation type 'SwiftUIMacros.StateMacro' could not be found`；
-   - 脚本自动按顺序探测工具链：环境变量 `DEVELOPER_DIR` → `/Applications/Xcode.app` → `~/Downloads/Xcode.app`；若机器只有 CLT，必须先安装完整 Xcode（Xcode 在非标准位置也能被脚本兜底识别）。
+   - SwiftUI 宏插件（`SwiftUIMacros`）只随完整版 Xcode 分发；仅装 Command Line Tools 的机器用 **27.x SDK** 编译 ApexUI 会报 `external macro implementation type 'SwiftUIMacros.StateMacro' could not be found`；
+   - 脚本自动按顺序探测工具链：环境变量 `DEVELOPER_DIR` → `/Applications/Xcode.app` → `~/Downloads/Xcode.app`；都没有时兜底为 **CLT + `SDKROOT=MacOSX26.5.sdk`**（26.5 SDK 的 SwiftUI 尚未宏化，无需宏插件，产物可正常运行于更高 macOS 版本）；
+   - 注意：切换 SDK 会失效 SPM 缓存触发全量重编（约 2-3 分钟），同一台机器尽量固定一种工具链。
 6. **零捆绑红线对本地包同样生效**：
    - Xcode 不在 `/Applications`（如 `~/Downloads`）时，链接器会把工具链绝对路径写进主程序 LC_RPATH，触发 `verify_bundle_security.py` 家目录扫描失败；脚本已实现自动清除含 `$HOME` 的 rpath 后再扫描、再签名，无需人工干预；
    - 本机未安装 sshpass 时脚本会提示密码认证回退 PTY 提示自动填充；如需捆绑，先 `brew install hudochenkov/sshpass/sshpass` 再重跑脚本。
