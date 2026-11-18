@@ -29,9 +29,13 @@ public struct SessionEditModal: View {
     @State private var sftpAutoSync: Bool = true
     @State private var keepAliveInterval: Int = 15
     @State private var terminalType: TerminalType = .default
+    @State private var initialWorkingDirectory: String = ""
+    @State private var startupCommand: String = ""
+    @State private var environmentVariablesText: String = ""
     @State private var saveError: String?
     @State private var isTestingConnection: Bool = false
     @State private var testResult: SSHTestConnectionResult?
+    @State private var cachedCertificateInfo = SSHCertificateInfo(isValid: false, keyType: nil, comment: nil)
     
     public enum AuthType: String, CaseIterable, Identifiable {
         case password = "密码认证"
@@ -208,9 +212,11 @@ public struct SessionEditModal: View {
                                     }
                                 }
                                 .onChange(of: selectedVaultKeyId) { _, newId in
-                                    if let newId = newId, let vk = SSHKeyVaultManager.shared.key(for: newId) {
-                                        privateKeyPath = vk.keychainPrivateKeyRef
-                                    }
+                                    privateKeyPath = Self.resolvedPrivateKeyPathAfterPickerChange(
+                                        selectedVaultKeyId: newId,
+                                        currentPath: privateKeyPath,
+                                        keys: SSHKeyVaultManager.shared.keys
+                                    )
                                 }
                             }
                             
@@ -219,6 +225,12 @@ public struct SessionEditModal: View {
                                     .accessibilityLabel("私钥路径")
                                     .accessibilityIdentifier("session.privateKeyPath")
                                     .font(.system(.body, design: .monospaced))
+                                    .onChange(of: privateKeyPath) { _, newValue in
+                                        let matched = Self.matchedVaultKeyId(forPrivateKeyPath: newValue, keys: SSHKeyVaultManager.shared.keys)
+                                        if selectedVaultKeyId != matched {
+                                            selectedVaultKeyId = matched
+                                        }
+                                    }
                                 ApexActionButton(
                                     "浏览...",
                                     icon: "folder",
@@ -255,8 +267,12 @@ public struct SessionEditModal: View {
                                     }
                                 }
                                 .onChange(of: selectedVaultKeyId) { _, newId in
-                                    if let newId = newId, let vk = SSHKeyVaultManager.shared.key(for: newId) {
-                                        privateKeyPath = vk.keychainPrivateKeyRef
+                                    privateKeyPath = Self.resolvedPrivateKeyPathAfterPickerChange(
+                                        selectedVaultKeyId: newId,
+                                        currentPath: privateKeyPath,
+                                        keys: SSHKeyVaultManager.shared.keys
+                                    )
+                                    if newId != nil {
                                         autoDiscoverCertificateIfNeeded()
                                     }
                                 }
@@ -267,7 +283,11 @@ public struct SessionEditModal: View {
                                     .accessibilityLabel("私钥路径")
                                     .accessibilityIdentifier("session.privateKeyPath")
                                     .font(.system(.body, design: .monospaced))
-                                    .onChange(of: privateKeyPath) { _, _ in
+                                    .onChange(of: privateKeyPath) { _, newValue in
+                                        let matched = Self.matchedVaultKeyId(forPrivateKeyPath: newValue, keys: SSHKeyVaultManager.shared.keys)
+                                        if selectedVaultKeyId != matched {
+                                            selectedVaultKeyId = matched
+                                        }
                                         autoDiscoverCertificateIfNeeded()
                                     }
                                 ApexActionButton(
@@ -409,6 +429,26 @@ public struct SessionEditModal: View {
                         .font(.caption)
                         .foregroundStyle(ApexStyle.secondary)
                 }
+
+                // 5. 登录启动与环境变量
+                Section("登录启动与环境变量") {
+                    TextField("初始工作目录 (如 /var/www/app 或 ~/workspace)", text: $initialWorkingDirectory)
+                        .accessibilityLabel("初始工作目录")
+                        .accessibilityIdentifier("session.initialWorkingDirectory")
+                        .font(.system(.body, design: .monospaced))
+                    TextField("登录后自动执行命令 (如 tmux attach -t main || tmux new -s main)", text: $startupCommand)
+                        .accessibilityLabel("登录后自动执行命令")
+                        .accessibilityIdentifier("session.startupCommand")
+                        .font(.system(.body, design: .monospaced))
+                    TextField("自定义环境变量 (每行 KEY=VALUE，如 APP_ENV=production)", text: $environmentVariablesText, axis: .vertical)
+                        .lineLimit(2...4)
+                        .accessibilityLabel("自定义环境变量")
+                        .accessibilityIdentifier("session.environmentVariables")
+                        .font(.system(.body, design: .monospaced))
+                    Text("敏感变量名（含 SECRET / TOKEN / PASSWORD 等）仅在本地生效，iCloud 云同步时将自动脱敏剔除。")
+                        .font(.caption2)
+                        .foregroundStyle(ApexStyle.secondary)
+                }
             }
             .formStyle(.grouped)
 
@@ -456,7 +496,7 @@ public struct SessionEditModal: View {
                     .help(result.isSuccess ? "连接正常" : (result.errorMessage ?? "连接失败"))
                     .accessibilityIdentifier("session.testResultBanner")
                     .transition(.opacity)
-                } else if let message = saveError ?? authValidationMessage {
+                } else if let message = saveError ?? authValidationMessage ?? envValidationMessage {
                     Text(message)
                         .font(.caption)
                         .foregroundStyle(saveError != nil ? ApexStyle.error : ApexStyle.warning)
@@ -484,7 +524,7 @@ public struct SessionEditModal: View {
                 ) {
                     saveSession()
                 }
-                .disabled(host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !isValidPort || authValidationMessage != nil)
+                .disabled(host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !isValidPort || authValidationMessage != nil || envValidationMessage != nil)
                 .keyboardShortcut(.defaultAction)
             }
             .padding(.horizontal, 20)
@@ -512,19 +552,28 @@ public struct SessionEditModal: View {
         .onChange(of: authType) { _, _ in testResult = nil }
         .onChange(of: privateKeyPath) { _, _ in testResult = nil }
         .onChange(of: passphrase) { _, _ in testResult = nil }
-        .onChange(of: certificatePath) { _, _ in testResult = nil }
+        .onChange(of: certificatePath) { _, newValue in
+            testResult = nil
+            cachedCertificateInfo = Self.inspectCertificateFile(atPath: newValue)
+        }
         .onChange(of: jumpServerId) { _, _ in testResult = nil }
+    }
+
+    nonisolated public static func inspectCertificateFile(atPath rawPath: String) -> SSHCertificateInfo {
+        let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return SSHCertificateInfo(isValid: false, keyType: nil, comment: nil)
+        }
+        let expandedPath = (trimmed as NSString).expandingTildeInPath
+        if let content = try? String(contentsOfFile: expandedPath, encoding: .utf8) {
+            return SSHCertificateHelper.inspectCertificate(certContent: content)
+        }
+        return SSHCertificateInfo(isValid: false, keyType: nil, comment: nil)
     }
 
     @ViewBuilder
     private var certificateStatusBanner: some View {
-        let certInfo: SSHCertificateInfo = {
-            let expandedPath = (certificatePath as NSString).expandingTildeInPath
-            if let content = try? String(contentsOfFile: expandedPath, encoding: .utf8) {
-                return SSHCertificateHelper.inspectCertificate(certContent: content)
-            }
-            return SSHCertificateInfo(isValid: false, keyType: nil, comment: nil)
-        }()
+        let certInfo = cachedCertificateInfo
         
         HStack(spacing: 6) {
             Image(systemName: certInfo.isValid ? "checkmark.seal.fill" : "exclamationmark.triangle")
@@ -552,6 +601,16 @@ public struct SessionEditModal: View {
 
     private var authValidationMessage: String? {
         authType.validationMessage(privateKeyPath: privateKeyPath, certificatePath: certificatePath)
+    }
+
+    private var envValidationMessage: String? {
+        Self.environmentValidationMessage(for: environmentVariablesText)
+    }
+
+    nonisolated public static func environmentValidationMessage(for text: String) -> String? {
+        let parsed = SessionStartupHelper.parseEnvLines(text)
+        guard !parsed.invalidKeys.isEmpty else { return nil }
+        return "环境变量名格式无效：\(parsed.invalidKeys.joined(separator: ", "))"
     }
 
     private var availableAuthTypes: [AuthType] {
@@ -684,6 +743,9 @@ public struct SessionEditModal: View {
         terminalType = s.terminalType
         sftpAutoSync = s.sftpAutoSyncEnabled
         keepAliveInterval = [10, 15, 30, 60].contains(s.keepAliveIntervalSeconds) ? s.keepAliveIntervalSeconds : 15
+        initialWorkingDirectory = s.initialWorkingDirectory ?? ""
+        startupCommand = s.startupCommand ?? ""
+        environmentVariablesText = SessionStartupHelper.formatEnvLines(s.environmentVariables)
         
         jumpServerId = s.jumpServerId
         
@@ -702,6 +764,7 @@ public struct SessionEditModal: View {
         case .privateKey(let keyPath, let passRef):
             authType = .privateKey
             privateKeyPath = keyPath
+            selectedVaultKeyId = Self.matchedVaultKeyId(forPrivateKeyPath: keyPath, keys: SSHKeyVaultManager.shared.keys)
             if let ref = passRef, !ref.isEmpty {
                 Task {
                     if let saved = try? await KeychainStore.shared.get(key: ref) {
@@ -715,6 +778,8 @@ public struct SessionEditModal: View {
             authType = .certificate
             privateKeyPath = keyPath
             certificatePath = certPath
+            cachedCertificateInfo = Self.inspectCertificateFile(atPath: certPath)
+            selectedVaultKeyId = Self.matchedVaultKeyId(forPrivateKeyPath: keyPath, keys: SSHKeyVaultManager.shared.keys)
             if let ref = passRef, !ref.isEmpty {
                 Task {
                     if let saved = try? await KeychainStore.shared.get(key: ref) {
@@ -785,6 +850,14 @@ public struct SessionEditModal: View {
             authMethod = .agent
         }
         
+        let trimmedInitDir = initialWorkingDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedStartupCmd = startupCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parsedEnv = SessionStartupHelper.parseEnvLines(environmentVariablesText)
+        if !parsedEnv.invalidKeys.isEmpty {
+            saveError = "环境变量名无效：\(parsedEnv.invalidKeys.joined(separator: ", "))"
+            return
+        }
+
         let newSession = Session(
             id: sessionId,
             name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? host.trimmingCharacters(in: .whitespaces) : name.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -800,11 +873,38 @@ public struct SessionEditModal: View {
             sftpAutoSyncEnabled: sftpAutoSync,
             keepAliveIntervalSeconds: keepAliveInterval,
             terminalType: terminalType,
+            initialWorkingDirectory: trimmedInitDir.isEmpty ? nil : trimmedInitDir,
+            startupCommand: trimmedStartupCmd.isEmpty ? nil : trimmedStartupCmd,
+            environmentVariables: parsedEnv.variables,
             createdAt: initialSession?.createdAt ?? Date(),
             lastConnectedAt: initialSession?.lastConnectedAt
         )
         onSave(newSession)
         dismiss()
+    }
+
+    /// Finds the SSHKeyIdentity ID whose `keychainPrivateKeyRef` matches `path`.
+    nonisolated public static func matchedVaultKeyId(forPrivateKeyPath path: String, keys: [SSHKeyIdentity]) -> UUID? {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return keys.first(where: { $0.keychainPrivateKeyRef == trimmed })?.id
+    }
+
+    /// Resolves the updated `privateKeyPath` when the user changes the SSH Key Vault picker.
+    /// Selecting "手动指定路径 / 文件" (`nil`) clears any stale `vault.priv.<UUID>` reference while keeping manual paths intact.
+    nonisolated public static func resolvedPrivateKeyPathAfterPickerChange(
+        selectedVaultKeyId: UUID?,
+        currentPath: String,
+        keys: [SSHKeyIdentity]
+    ) -> String {
+        if let id = selectedVaultKeyId, let vk = keys.first(where: { $0.id == id }) {
+            return vk.keychainPrivateKeyRef
+        }
+        let trimmed = currentPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if KeychainStore.isVaultPrivateKeyReference(trimmed) || keys.contains(where: { $0.keychainPrivateKeyRef == trimmed }) {
+            return ""
+        }
+        return currentPath
     }
 }
 

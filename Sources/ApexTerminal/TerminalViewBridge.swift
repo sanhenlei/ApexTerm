@@ -109,6 +109,11 @@ public struct TerminalRepresentable: NSViewRepresentable {
         }
     }
     
+    public static func dismantleNSView(_ nsView: NativeTerminalScrollView, coordinator: Coordinator) {
+        coordinator.scrollView = nil
+        nsView.tearDown()
+    }
+    
     public func makeCoordinator() -> Coordinator {
         Coordinator()
     }
@@ -438,6 +443,7 @@ public final class NativeTerminalScrollView: NSScrollView {
         NotificationCenter.default.addObserver(self, selector: #selector(handleTriggerFindNotification), name: NSNotification.Name("TriggerTerminalFind"), object: nil)
         
         // Register for file drop
+        self.unregisterDraggedTypes()
         self.registerForDraggedTypes([.fileURL])
     }
     
@@ -460,6 +466,17 @@ public final class NativeTerminalScrollView: NSScrollView {
     
     public func hideFindBar() {
         searchBarOverlay.hide()
+    }
+    
+    /// Explicitly releases observers, timers, and backing text storage when the scroll view is dismantled.
+    public func tearDown() {
+        NotificationCenter.default.removeObserver(self)
+        searchBarOverlay.terminalView = nil
+        terminalView.tearDown()
+    }
+    
+    isolated deinit {
+        NotificationCenter.default.removeObserver(self)
     }
     
     @objc private func handleTriggerFindNotification(_ note: Notification) {
@@ -505,23 +522,33 @@ public final class NativeTerminalScrollView: NSScrollView {
         super.mouseDown(with: event)
     }
     
+    public func setDropTargetHighlight(_ highlighted: Bool) {
+        self.layer?.borderWidth = highlighted ? 2.0 : 0.0
+        self.layer?.borderColor = highlighted ? NSColor.controlAccentColor.cgColor : nil
+    }
+    
     override public func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        if sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: nil) {
-            return .copy
-        }
-        return []
+        terminalView.draggingEntered(sender)
+    }
+    
+    override public func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        terminalView.draggingUpdated(sender)
+    }
+    
+    override public func draggingExited(_ sender: NSDraggingInfo?) {
+        terminalView.draggingExited(sender)
+    }
+    
+    override public func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        terminalView.prepareForDragOperation(sender)
     }
     
     override public func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
-              !urls.isEmpty else { return false }
-        if let dropHandler = terminalView.onFileDrop {
-            for url in urls {
-                dropHandler(url)
-            }
-            return true
-        }
-        return false
+        terminalView.performDragOperation(sender)
+    }
+    
+    override public func concludeDragOperation(_ sender: NSDraggingInfo?) {
+        terminalView.concludeDragOperation(sender)
     }
     
     required init?(coder: NSCoder) {
@@ -550,6 +577,8 @@ public final class NativeTerminalView: NSTextView {
     }
     public var onInput: ((Data) -> Void)?
     public var isCopyOnSelectEnabled: Bool = true
+    public private(set) var bellTriggerCount: Int = 0
+    private var visualBellLayer: CALayer?
     public var onResize: ((Int, Int) -> Void)?
     public var onFileDrop: ((URL) -> Void)?
     public var onFocus: (() -> Void)? = nil
@@ -609,8 +638,21 @@ public final class NativeTerminalView: NSTextView {
     private var cachedBaseFont: NSFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
     private var cachedBoldFont: NSFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .bold)
     private var glyphAdvanceCache: [String: CGFloat] = [:]
+    public static let maxColorCacheEntries: Int = 1024
     private static var colorCache: [String: NSColor] = [:]
     private static let colorCacheLock = NSLock()
+    
+    public static var cachedColorCount: Int {
+        colorCacheLock.lock()
+        defer { colorCacheLock.unlock() }
+        return colorCache.count
+    }
+    
+    public static func clearColorCache() {
+        colorCacheLock.lock()
+        colorCache.removeAll(keepingCapacity: false)
+        colorCacheLock.unlock()
+    }
     
     /// Tracks whether viewport is pinned to the command prompt line at the bottom
     public var isPinnedToBottom: Bool = true
@@ -749,23 +791,69 @@ public final class NativeTerminalView: NSTextView {
         }
     }
     
-    override public func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        if sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: nil) {
-            return .copy
+    public private(set) var isFileDropTargeted: Bool = false {
+        didSet {
+            (enclosingScrollView as? NativeTerminalScrollView)?.setDropTargetHighlight(isFileDropTargeted)
         }
-        return []
+    }
+
+    private func canAcceptFileDrop(_ sender: NSDraggingInfo) -> Bool {
+        guard onFileDrop != nil else { return false }
+        // Do not intercept an outgoing SFTP file-promise drag initiated from inside the same window
+        if let sourceView = sender.draggingSource as? NSView, let window = self.window, sourceView.window === window {
+            return false
+        }
+        return sender.draggingPasteboard.canReadObject(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        )
+    }
+
+    override public func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard canAcceptFileDrop(sender) else {
+            isFileDropTargeted = false
+            return []
+        }
+        isFileDropTargeted = true
+        return .copy
+    }
+    
+    override public func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard canAcceptFileDrop(sender) else {
+            isFileDropTargeted = false
+            return []
+        }
+        isFileDropTargeted = true
+        return .copy
+    }
+    
+    override public func draggingExited(_ sender: NSDraggingInfo?) {
+        isFileDropTargeted = false
+    }
+    
+    override public func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        canAcceptFileDrop(sender)
     }
     
     override public func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
-              !urls.isEmpty else { return false }
-        if let dropHandler = onFileDrop {
-            for url in urls {
-                dropHandler(url)
-            }
-            return true
+        isFileDropTargeted = false
+        guard canAcceptFileDrop(sender),
+              let urls = sender.draggingPasteboard.readObjects(
+                  forClasses: [NSURL.self],
+                  options: [.urlReadingFileURLsOnly: true]
+              ) as? [URL],
+              !urls.isEmpty,
+              let dropHandler = onFileDrop else {
+            return false
         }
-        return false
+        for url in urls {
+            dropHandler(url)
+        }
+        return true
+    }
+    
+    override public func concludeDragOperation(_ sender: NSDraggingInfo?) {
+        isFileDropTargeted = false
     }
     
     /// Coalesced refresh on the main thread for high-framerate batching (thread-safe, nonisolated)
@@ -835,6 +923,7 @@ public final class NativeTerminalView: NSTextView {
         self.wantsLayer = true
         self.layerContentsRedrawPolicy = .onSetNeedsDisplay
         
+        self.unregisterDraggedTypes()
         self.registerForDraggedTypes([.fileURL])
         
         settingsObserver = NotificationCenter.default.addObserver(forName: AppSettings.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
@@ -988,8 +1077,34 @@ public final class NativeTerminalView: NSTextView {
         needsDisplay = true
     }
     
+    /// Explicitly tears down timers, notification observers, callbacks, and cached attributed rows.
+    public func tearDown() {
+        stopCursorBlink()
+        resizeDebounceTask?.cancel()
+        resizeDebounceTask = nil
+        pendingDimensions = nil
+        NotificationCenter.default.removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        if let settingsObserver {
+            NotificationCenter.default.removeObserver(settingsObserver)
+            self.settingsObserver = nil
+        }
+        ringBuffer?.onUpdate = nil
+        ringBuffer = nil
+        onInput = nil
+        onResize = nil
+        onFileDrop = nil
+        onFocus = nil
+        renderedScreenRows = nil
+        renderedScreenLines = nil
+        renderedCommittedLineLengths.removeAll(keepingCapacity: false)
+        glyphAdvanceCache.removeAll(keepingCapacity: false)
+        textStorage?.setAttributedString(NSAttributedString())
+    }
+    
     isolated deinit {
         cursorBlinkTimer?.invalidate()
+        resizeDebounceTask?.cancel()
         NotificationCenter.default.removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         if let settingsObserver { NotificationCenter.default.removeObserver(settingsObserver) }
@@ -1303,8 +1418,10 @@ public final class NativeTerminalView: NSTextView {
         }
     }
     
+    private nonisolated static let linkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+
     public nonisolated static func detectURLs(in text: String) -> [DetectedURLMatch] {
-        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return [] }
+        guard let detector = Self.linkDetector else { return [] }
         let nsText = text as NSString
         let rawMatches = detector.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
         
@@ -1799,8 +1916,10 @@ public final class NativeTerminalView: NSTextView {
     }
     
     override public func menu(for event: NSEvent) -> NSMenu? {
-        // If there is an active selection, ensure it is copied
-        copySelectionToPasteboardIfAny()
+        // If there is an active selection and copy-on-select is enabled, ensure it is copied
+        if isCopyOnSelectEnabled {
+            copySelectionToPasteboardIfAny()
+        }
         
         let menu = NSMenu(title: "Terminal")
         let hasSelection = self.selectedRange().length > 0
@@ -2076,6 +2195,9 @@ public final class NativeTerminalView: NSTextView {
                     Self.colorCacheLock.unlock()
                     if let parsed = NSColor(hex: hex) {
                         Self.colorCacheLock.lock()
+                        if Self.colorCache.count >= Self.maxColorCacheEntries {
+                            Self.colorCache.removeAll(keepingCapacity: true)
+                        }
                         Self.colorCache[hex] = parsed
                         Self.colorCacheLock.unlock()
                         textColor = parsed
@@ -2147,9 +2269,51 @@ public final class NativeTerminalView: NSTextView {
         }
     }
     
+    public func handleBellIfNeeded() {
+        guard ringBuffer?.consumeBellFlag() == true else { return }
+        bellTriggerCount += 1
+        switch AppSettings.shared.bellMode {
+        case .audible:
+            NSSound.beep()
+        case .visual:
+            triggerVisualBellFlash()
+        case .none:
+            break
+        }
+    }
+
+    private func triggerVisualBellFlash() {
+        guard let hostLayer = self.layer else {
+            self.needsDisplay = true
+            return
+        }
+        let flashLayer = visualBellLayer ?? {
+            let layer = CALayer()
+            layer.zPosition = 999
+            visualBellLayer = layer
+            return layer
+        }()
+        flashLayer.frame = bounds
+        let fg = NSColor(hex: AppSettings.shared.themePreset.palette.foreground) ?? .white
+        flashLayer.backgroundColor = fg.withAlphaComponent(0.16).cgColor
+        if flashLayer.superlayer == nil {
+            hostLayer.addSublayer(flashLayer)
+        }
+        flashLayer.removeAllAnimations()
+        flashLayer.opacity = 1.0
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(0.18)
+        CATransaction.setCompletionBlock { [weak flashLayer] in
+            flashLayer?.removeFromSuperlayer()
+        }
+        flashLayer.opacity = 0.0
+        CATransaction.commit()
+    }
+
     /// Incremental refresh: updates active line in-place and appends newly committed lines
     public func refresh() {
         guard let buffer = ringBuffer else { return }
+        handleBellIfNeeded()
 
         if let screenLines = buffer.screenLines {
             let lineHeight = layoutManager?.defaultLineHeight(for: cachedBaseFont) ?? 16

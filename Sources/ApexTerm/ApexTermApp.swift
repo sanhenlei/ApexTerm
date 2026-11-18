@@ -127,6 +127,7 @@ struct ApexTermApp: App {
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
                 SSHTunnelManager.shared.stopAll()
                 TransferManager.shared.cancelAllTasks()
+                SSHKeyVaultManager.cleanupMaterializedKeys()
                 for tab in activeTabs {
                     for pane in tab.panes {
                         (pane.sshClient as? NativeSSHSession)?.terminatePTYProcess()
@@ -422,9 +423,7 @@ struct ApexTermApp: App {
         if current.panes.count > 1, let activeId = current.activePaneId {
             current.closePane(id: activeId)
         } else {
-            for pane in current.panes {
-                Task { await pane.sshClient.disconnect() }
-            }
+            current.tearDown()
             activeTabs.removeAll(where: { $0.id == current.id })
             selectedTabId = activeTabs.first?.id
         }
@@ -479,18 +478,6 @@ struct ApexTermApp: App {
     }
     
     private func runSnippet(_ snippet: Snippet) {
-        guard let current = activeTabs.first(where: { $0.id == selectedTabId }) else { return }
-        let resolved = snippet.resolvedCommand(context: [
-            "host": current.session.host,
-            "user": current.session.username,
-            "port": "\(current.session.port)"
-        ])
-        let toSend = snippet.autoExecute ? "\(resolved)\n" : resolved
-        if let data = toSend.data(using: .utf8) {
-            Task {
-                let target = current.activePane?.sshClient ?? current.sshClient
-                try? await target.sendInput(data)
-            }
-        }
+        NotificationCenter.default.post(name: WorkspaceView.executeSnippetNotification, object: snippet)
     }
 }

@@ -244,6 +244,9 @@ public final class NativeSSHSession: SSHSessionProtocol, @unchecked Sendable {
     }
 
     public static func expandPath(_ path: String) -> String {
+        if KeychainStore.isVaultPrivateKeyReference(path) {
+            return SSHKeyVaultManager.materializePrivateKeyPath(for: path) ?? path
+        }
         if path.hasPrefix("~/") {
             let home = FileManager.default.homeDirectoryForCurrentUser.path
             return home + "/" + String(path.dropFirst(2))
@@ -298,7 +301,8 @@ public final class NativeSSHSession: SSHSessionProtocol, @unchecked Sendable {
     /// Every child operation owns its grant independently, including cancellation cleanup.
     func acquirePrivateKeyAccess() throws -> FileAccessLease? {
         guard distributionChannel == .appStore,
-              let path = session.privateKeyPath, !path.isEmpty else { return nil }
+              let path = session.privateKeyPath, !path.isEmpty,
+              !KeychainStore.isVaultPrivateKeyReference(path) else { return nil }
         let access = try fileAccessStore.acquire(URL(fileURLWithPath: Self.expandPath(path)))
         guard FileManager.default.isReadableFile(atPath: access.url.path) else {
             access.close()
@@ -783,15 +787,24 @@ public final class NativeSSHSession: SSHSessionProtocol, @unchecked Sendable {
         }
     }
 
-    static func writePTYInput(_ data: Data, to descriptor: Int32) {
+    public static func writePTYInput(_ data: Data, to descriptor: Int32) {
         data.withUnsafeBytes { raw in
             guard let base = raw.baseAddress else { return }
             var offset = 0
+            var eagainRetries = 0
             while offset < raw.count {
                 let written = write(descriptor, base.advanced(by: offset), min(4096, raw.count - offset))
-                if written > 0 { offset += written }
-                else if written < 0 && errno == EINTR { continue }
-                else { return }
+                if written > 0 {
+                    offset += written
+                    eagainRetries = 0
+                } else if written < 0 && errno == EINTR {
+                    continue
+                } else if written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) && eagainRetries < 500 {
+                    eagainRetries += 1
+                    usleep(1_000)
+                } else {
+                    return
+                }
             }
         }
     }
@@ -1523,8 +1536,32 @@ public final class NativeSSHSession: SSHSessionProtocol, @unchecked Sendable {
         return "\(username)@\(address):\(path)"
     }
 
+    public static func expandTildeForSCP(_ path: String, homeDirectory: String?) -> String {
+        guard path == "~" || path.hasPrefix("~/") else { return path }
+        if let home = homeDirectory, home.hasPrefix("/") {
+            let trimmedHome = home.hasSuffix("/") && home.count > 1 ? String(home.dropLast()) : home
+            return path == "~" ? trimmedHome : trimmedHome + "/" + String(path.dropFirst(2))
+        }
+        // In OpenSSH scp (SFTP mode), a relative path after `user@host:` is resolved relative
+        // to the remote user's home directory, whereas a literal `~/` can fail on servers
+        // without expand-path@openssh.com.
+        let relative = path == "~" ? "." : String(path.dropFirst(2))
+        return relative.isEmpty ? "." : relative
+    }
+
+    private func resolveRemotePathForTransfer(_ path: String) async -> String {
+        guard path == "~" || path.hasPrefix("~/") else { return path }
+        var home = remoteHomeDirectory
+        if home == nil { home = await probeRemoteHome() }
+        if let home, home.hasPrefix("/") {
+            remoteHomeDirectory = home
+        }
+        return Self.expandTildeForSCP(path, homeDirectory: home)
+    }
+
     public func downloadFile(remotePath: String, localURL: URL, progress: @Sendable @escaping (Double) -> Void) async throws {
         await resolvePasswordIfNeeded()
+        let resolvedRemotePath = await resolveRemotePathForTransfer(remotePath)
         let keyAccess = try acquirePrivateKeyAccess()
         defer { keyAccess?.close() }
         let certAccess = try acquireCertificateAccess()
@@ -1547,7 +1584,7 @@ public final class NativeSSHSession: SSHSessionProtocol, @unchecked Sendable {
         baseArgs.append(contentsOf: jumpServerArgs())
         // Modern scp uses SFTP: the remote path is already one argv operand.
         // Shell quote characters would become part of the filename.
-        let escapedRemote = remotePath
+        let escapedRemote = resolvedRemotePath
         baseArgs.append(contentsOf: [
             "-P", "\(session.port)",
             Self.scpRemoteSpecifier(username: session.username, host: session.host, path: escapedRemote),
@@ -1576,6 +1613,7 @@ public final class NativeSSHSession: SSHSessionProtocol, @unchecked Sendable {
     
     public func uploadFile(localURL: URL, remotePath: String, progress: @Sendable @escaping (Double) -> Void) async throws {
         await resolvePasswordIfNeeded()
+        let resolvedRemotePath = await resolveRemotePathForTransfer(remotePath)
         let keyAccess = try acquirePrivateKeyAccess()
         defer { keyAccess?.close() }
         let certAccess = try acquireCertificateAccess()
@@ -1598,7 +1636,7 @@ public final class NativeSSHSession: SSHSessionProtocol, @unchecked Sendable {
         baseArgs.append(contentsOf: jumpServerArgs())
         // Modern scp uses SFTP: the remote path is already one argv operand.
         // Shell quote characters would become part of the filename.
-        let escapedRemote = remotePath
+        let escapedRemote = resolvedRemotePath
         baseArgs.append(contentsOf: [
             "-P", "\(session.port)",
             accessibleURL.path,
