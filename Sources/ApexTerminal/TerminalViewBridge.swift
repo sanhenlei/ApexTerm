@@ -44,6 +44,9 @@ public struct TerminalRepresentable: NSViewRepresentable {
         scrollView.terminalView.onResize = onResize
         scrollView.terminalView.onFileDrop = onFileDrop
         scrollView.terminalView.onFocus = onFocus
+        // Restore the user's scroll anchoring before rehydration so refresh()
+        // does not jump to the bottom while rebuilding content.
+        scrollView.terminalView.isPinnedToBottom = ringBuffer.scrollAnchor.isPinnedToBottom
         context.coordinator.scrollView = scrollView
         context.coordinator.wasFocused = isFocused
         
@@ -66,7 +69,7 @@ public struct TerminalRepresentable: NSViewRepresentable {
             }
             scrollView.terminalView.notifyDimensionsChangedIfNeeded(immediate: true)
             if scrollView.terminalView.ringBuffer?.isInAlternateScreen != true {
-                scrollView.terminalView.scrollToBottom(forceLayout: true)
+                scrollView.terminalView.restoreScrollAnchorOnRebuild()
             }
         }
         
@@ -788,6 +791,51 @@ public final class NativeTerminalView: NSTextView {
             } else {
                 isPinnedToBottom = false
             }
+            if let anchor = ringBuffer?.scrollAnchor {
+                anchor.isPinnedToBottom = isPinnedToBottom
+                anchor.offset = clipView.bounds.origin.y
+            }
+        }
+    }
+
+    /// Set after a rebuild (tab switch recreates the view via `.id`) to re-apply the
+    /// anchor saved on the ring buffer. Deferred until layout gives real geometry.
+    private var pendingScrollRestore = false
+
+    public func restoreScrollAnchorOnRebuild() {
+        pendingScrollRestore = true
+        DispatchQueue.main.async { [weak self] in
+            self?.applyPendingScrollRestore()
+        }
+    }
+
+    override public func layout() {
+        super.layout()
+        applyPendingScrollRestore()
+    }
+
+    private func applyPendingScrollRestore() {
+        guard pendingScrollRestore else { return }
+        guard ringBuffer?.isInAlternateScreen != true else {
+            pendingScrollRestore = false
+            return
+        }
+        guard let clipView = enclosingScrollView?.contentView,
+              clipView.bounds.height > 0, frame.height > 0 else { return }
+        pendingScrollRestore = false
+        if isPinnedToBottom {
+            scrollToBottom(forceLayout: true)
+        } else if let anchor = ringBuffer?.scrollAnchor {
+            let maxY = max(0, frame.height - clipView.bounds.height)
+            let target = NSPoint(x: 0, y: min(max(0, anchor.offset), maxY))
+            if abs(clipView.bounds.origin.y - target.y) > 0.5 {
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                clipView.scroll(to: target)
+                enclosingScrollView?.reflectScrolledClipView(clipView)
+                CATransaction.commit()
+            }
+            isPinnedToBottom = false
         }
     }
     
