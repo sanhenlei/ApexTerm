@@ -214,6 +214,39 @@ swift test
 11. **官方网站同步核验**：
     确认官方网站触发同步并部署上线，核验 `releases.yaml` 与官网下载链接。
 
+---
+
+## 📦 八、本地自用快速打包 (Local Install Packaging - 免门禁/免公证)
+
+仅限本机安装使用的快速打包流水线（开发自测、日常自用）。**产物为 ad-hoc 签名、未公证，严禁对外分发**；正式发布（打 Tag、上传 GitHub Release、对外分发）必须走第七节的 `scripts/build_app.sh` 完整流水线，两条流水线不可混用。
+
+1. **标准命令**：
+   ```bash
+   ./scripts/package_local.sh              # 增量 Release 构建 + 安全扫描 + ad-hoc 签名 + DMG + SHA256
+   ./scripts/package_local.sh --install    # 直接安装到 /Applications（保留一次回滚备份），不产出 DMG
+   ./scripts/package_local.sh --test       # 打包前先跑 swift test 全量门禁
+   ./scripts/package_local.sh 1.24.0       # 指定版本号（默认对齐上游最新 Release）
+   ```
+2. **版本号约定（防误报更新，红线）**：
+   - 本地包版本号必须与上游最新 Release 完全一致（当前为 `1.23.6`），**严禁添加 `-local` 等后缀**；
+   - 原因：应用内更新器 `UpdateManager` 的 SemVer 比较判定同版本号下正式版 > 预发布版（`1.23.6 > 1.23.6-local`），带后缀会被误判为旧版本，导致应用持续提示"可更新到上游同名版本"；
+   - 上游发布新版本后，必须同步更新 `scripts/package_local.sh` 中的默认版本号。
+3. **产物位置（固定）**：
+   - DMG：`~/Downloads/AetherTerm-v<VERSION>-macos-arm64.dmg`；
+   - SHA256：`~/Downloads/AetherTerm-v<VERSION>-macos-arm64.sha256`（与 DMG 同名跟随）；
+   - 应用包工作目录留在 `.build/AetherTerm.app`（可复用、勿手动清理后丢弃）。
+4. **性能预期（依赖 SPM 增量缓存）**：
+   - 代码未改动：全流程约 7 秒（构建 ~0.4s + 打包 ~6s）；
+   - 单文件改动：约 30 秒（Release WMO 整模块重编，ApexUI 为最大模块约 24s）；
+   - **严禁在本地打包前后清理 `.build` 缓存**，否则退化为 60-90 秒全量冷构建。
+5. **工具链要求（macOS 27+ 环境坑）**：
+   - SwiftUI 宏插件（`SwiftUIMacros`）只随完整版 Xcode 分发；仅装 Command Line Tools 的机器编译 ApexUI 会报 `external macro implementation type 'SwiftUIMacros.StateMacro' could not be found`；
+   - 脚本自动按顺序探测工具链：环境变量 `DEVELOPER_DIR` → `/Applications/Xcode.app` → `~/Downloads/Xcode.app`；若机器只有 CLT，必须先安装完整 Xcode（Xcode 在非标准位置也能被脚本兜底识别）。
+6. **零捆绑红线对本地包同样生效**：
+   - Xcode 不在 `/Applications`（如 `~/Downloads`）时，链接器会把工具链绝对路径写进主程序 LC_RPATH，触发 `verify_bundle_security.py` 家目录扫描失败；脚本已实现自动清除含 `$HOME` 的 rpath 后再扫描、再签名，无需人工干预；
+   - 本机未安装 sshpass 时脚本会提示密码认证回退 PTY 提示自动填充；如需捆绑，先 `brew install hudochenkov/sshpass/sshpass` 再重跑脚本。
+7. **验收基线**：本地打包默认跳过测试/Tart VM/UI 验收门禁（定位与 CI `build-app.yml` 一致）；若本次改动涉及核心逻辑（SSH/终端引擎/存储/密钥），建议追加 `--test` 跑全量门禁后再安装。
+
 ## 产品名称兼容
 
 产品展示名为 AetherTerm，官网 id 为 aetherterm。源码仓库、Swift 模块、主可执行文件、Bundle ID、会话目录和钥匙串标识保留历史兼容值，详见 docs/branding.md。正式 DMG 使用 AetherTerm.app；tar 更新包保留旧更新器要求的 ApexTerm.app 内部目录。
