@@ -659,7 +659,7 @@ public struct SFTPView: View {
                 onReload: {
                     try await reloadFileContentAsync(item)
                 },
-                maxHeight: windowReference.window.map { $0.frame.height }
+                maxHeight: windowReference.window.map { $0.frame.height - 44 }
             )
         }
         .sheet(item: $inspectingItem) { item in
