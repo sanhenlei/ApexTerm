@@ -8,6 +8,9 @@ public struct QuickEditorView: View {
     @Binding public var content: String
     public let onSave: (String) async throws -> Void
     public let onReload: () async throws -> String
+    /// Sheet height cap; pass the parent window height so the sheet never
+    /// grows to the screen height. nil keeps the previous unbounded behavior.
+    public var maxHeight: CGFloat?
     @Environment(\.dismiss) private var dismiss
     
     @State private var isSaving = false
@@ -27,12 +30,14 @@ public struct QuickEditorView: View {
         item: SFTPItem,
         content: Binding<String>,
         onSave: @escaping (String) async throws -> Void,
-        onReload: @escaping () async throws -> String
+        onReload: @escaping () async throws -> String,
+        maxHeight: CGFloat? = nil
     ) {
         self.item = item
         self._content = content
         self.onSave = onSave
         self.onReload = onReload
+        self.maxHeight = maxHeight
     }
     
     @State private var lineCount = 1
@@ -185,6 +190,7 @@ public struct QuickEditorView: View {
             .background(ApexStyle.surface)
         }
         .frame(minWidth: 720, minHeight: 520)
+        .frame(maxWidth: .infinity, maxHeight: maxHeight)
         .interactiveDismissDisabled(hasUnsavedChanges || isSaving || isReloading)
         .alert(item: $pendingDiscard) { action in
             Alert(title: Text("放弃未保存的更改？"),
